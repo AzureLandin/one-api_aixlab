@@ -52,7 +52,7 @@ function renderType(type) {
     case 1:
       return (
         <Label basic color='green'>
-          充值
+          发放
         </Label>
       );
     case 2:

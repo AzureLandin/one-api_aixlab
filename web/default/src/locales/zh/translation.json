@@ -226,7 +226,7 @@
     "type": {
       "select": "选择明细分类",
       "all": "全部",
-      "topup": "充值",
+      "topup": "发放额度",
       "usage": "消费",
       "admin": "管理",
       "system": "系统",

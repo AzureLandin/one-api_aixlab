@@ -226,7 +226,7 @@
     "type": {
       "select": "Select Log Type",
       "all": "All",
-      "topup": "Top Up",
+      "topup": "Quota Grant",
       "usage": "Usage",
       "admin": "Admin",
       "system": "System",

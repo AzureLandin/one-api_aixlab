@@ -1,22 +1,27 @@
-# 使用 API 操控 & 扩展 One API
-> 欢迎提交 PR 在此放上你的拓展项目。
+# 使用 API 操控 & 扩展本系统
 
-例如，虽然 One API 本身没有直接支持支付，但是你可以通过系统扩展的 API 来实现支付功能。
-
-又或者你想自定义渠道管理策略，也可以通过 API 来实现渠道的禁用与启用。
+本系统是面向课题组内网的 LLM 路由器，已移除兑换码、在线充值、第三方登录等运营功能。
+管理面 API 可以在无需二次开发的情况下扩展和自定义系统行为。
 
 ## 鉴权
-One API 支持两种鉴权方式：Cookie 和 Token，对于 Token，参照下图获取：
 
-![image](https://github.com/songquanpeng/songquanpeng.github.io/assets/39998050/c15281a7-83ed-47cb-a1f6-913cb6bf4a7c)
+支持两种鉴权方式：
 
-之后，将 Token 作为请求头的 Authorization 字段的值即可，例如下面使用 Token 调用测试渠道的 API：
-![image](https://github.com/songquanpeng/songquanpeng.github.io/assets/39998050/1273b7ae-cb60-4c0d-93a6-b1cbc039c4f8)
+1. **Cookie**：在浏览器中登录后，同源的 `/api/*` 请求会自动带上会话 Cookie。
+2. **用户访问令牌（AccessToken）**：在「设置 - 个人设置 - 重置系统访问令牌」处获取，
+   将令牌作为请求头 `Authorization` 的值即可调用管理 API，例如：
+
+```bash
+curl -X GET http://localhost:3000/api/channel/ \
+  -H "Authorization: <你的访问令牌>"
+```
+
+令牌的权限等级与其所属用户的角色一致（普通用户 / 管理员 / 超级管理员）。
 
 ## 请求格式与响应格式
-One API 使用 JSON 格式进行请求和响应。
 
-对于响应体，一般格式如下：
+所有接口使用 JSON。响应体格式统一为：
+
 ```json
 {
   "message": "请求信息",
@@ -26,28 +31,42 @@ One API 使用 JSON 格式进行请求和响应。
 ```
 
 ## API 列表
-> 当前 API 列表不全，请自行通过浏览器抓取前端请求
 
-如果现有的 API 没有办法满足你的需求，欢迎提交 issue 讨论。
+> 当前文档只列出内网运营常用的接口，其余接口请通过浏览器开发者工具抓取前端请求获取。
 
 ### 获取当前登录用户信息
+
 **GET** `/api/user/self`
 
-### 为给定用户充值额度
-**POST** `/api/topup`
+### 为用户发放额度
+
+**POST** `/api/topup` （需要管理员权限）
+
 ```json
 {
   "user_id": 1,
   "quota": 100000,
-  "remark": "充值 100000 额度"
+  "remark": "9 月课题组额度发放"
 }
 ```
 
-## 其他
-### 充值链接上的附加参数
-One API 会在用户点击充值按钮的时候，将用户的信息和充值信息附加在链接上，例如：
-`https://example.com?username=root&user_id=1&transaction_id=4b3eed80-55d5-443f-bd44-fb18c648c837`
+- `quota` 为**增量**，会在用户现有额度上累加。
+- `remark` 可选，省略时系统自动生成备注。
+- 每次发放都会写入一条类型为「充值」的用户日志，可在日志页审计。
 
-你可以通过解析链接上的参数来获取用户信息和充值信息，然后调用 API 来为用户充值。
+### 渠道管理
 
-注意，不是所有主题都支持该功能，欢迎 PR 补齐。
+- **GET** `/api/channel/`：分页获取渠道列表。
+- **POST** `/api/channel/`：新建渠道。
+- **PUT** `/api/channel/`：更新渠道。
+- **GET** `/api/channel/test/:id`：测试渠道。
+
+渠道的差异化参数（Azure / 讯飞的 `api_version`、AI Proxy Library 的 `library_id`、
+阿里的 `plugin` 等）统一放在渠道配置的 JSON 里，已不再使用旧的「其他」字段。
+
+### 选项管理
+
+- **GET** `/api/option/`：获取全部配置项（密钥类配置不返回）。
+- **PUT** `/api/option/`：更新单个配置项，请求体为 `{"key": "...", "value": "..."}`。
+
+如果现有的 API 无法满足需求，欢迎在内部仓库提 issue 讨论。
