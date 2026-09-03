@@ -66,6 +66,9 @@ _✨ 通过标准的 OpenAI API 格式访问所有的大模型，开箱即用 �
 > [!WARNING]
 > 使用 root 用户初次登录系统后，务必修改默认密码 `123456`！
 
+> [!NOTE]
+> 本仓库是面向课题组内网的 One API 裁剪版：已移除兑换码、在线充值、第三方登录、Turnstile 与多主题。登录为用户名或邮箱 + 密码；注册、绑邮箱与重置密码使用邮箱验证码。额度由管理员发放。改造规格见 [docs/lab-internal-migration.md](./docs/lab-internal-migration.md)，管理 API 见 [docs/API.md](./docs/API.md)。已有数据库升级请执行 [bin/migration_lab.sql](./bin/migration_lab.sql)；全新部署走 AutoMigrate 即可。
+
 ## 功能
 1. 支持多种大模型：
    + [x] [OpenAI ChatGPT 系列模型](https://platform.openai.com/docs/guides/gpt/chat-completions-api)（支持 [Azure OpenAI API](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)）
@@ -100,30 +103,24 @@ _✨ 通过标准的 OpenAI API 格式访问所有的大模型，开箱即用 �
 4. 支持 **stream 模式**，可以通过流式传输实现打字机效果。
 5. 支持**多机部署**，[详见此处](#多机部署)。
 6. 支持**令牌管理**，设置令牌的过期时间、额度、允许的 IP 范围以及允许的模型访问。
-7. 支持**兑换码管理**，支持批量生成和导出兑换码，可使用兑换码为账户进行充值。
+7. 支持管理员为用户**发放额度**（`POST /api/topup`），也可在用户编辑页操作。
 8. 支持**渠道管理**，批量创建渠道。
 9. 支持**用户分组**以及**渠道分组**，支持为不同分组设置不同的倍率。
 10. 支持渠道**设置模型列表**。
 11. 支持**查看额度明细**。
-12. 支持**用户邀请奖励**。
-13. 支持以美元为单位显示额度。
-14. 支持发布公告，设置充值链接，设置新用户初始额度。
-15. 支持模型映射，重定向用户的请求模型，如无必要请不要设置，设置之后会导致请求体被重新构造而非直接透传，会导致部分还未正式支持的字段无法传递成功。
-16. 支持失败自动重试。
-17. 支持绘图接口。
-18. 支持 [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/providers/openai/)，渠道设置的代理部分填写 `https://gateway.ai.cloudflare.com/v1/ACCOUNT_TAG/GATEWAY/openai` 即可。
-19. 支持丰富的**自定义**设置，
+12. 可选以美元为单位显示额度（默认关闭，按点数计）。
+13. 支持发布公告，设置新用户初始额度。
+14. 支持模型映射，重定向用户的请求模型，如无必要请不要设置，设置之后会导致请求体被重新构造而非直接透传，会导致部分还未正式支持的字段无法传递成功。
+15. 支持失败自动重试。
+16. 支持绘图接口。
+17. 支持 [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/providers/openai/)，渠道设置的代理部分填写 `https://gateway.ai.cloudflare.com/v1/ACCOUNT_TAG/GATEWAY/openai` 即可。
+18. 支持丰富的**自定义**设置，
     1. 支持自定义系统名称，logo 以及页脚。
     2. 支持自定义首页和关于页面，可以选择使用 HTML & Markdown 代码进行自定义，或者使用一个单独的网页通过 iframe 嵌入。
-20. 支持通过系统访问令牌调用管理 API，进而**在无需二开的情况下扩展和自定义** One API 的功能，详情请参考此处 [API 文档](./docs/API.md)。
-21. 支持 Cloudflare Turnstile 用户校验。
-22. 支持用户管理，支持**多种用户登录注册方式**：
-    + 邮箱登录注册（支持注册邮箱白名单）以及通过邮箱进行密码重置。
-    + 支持[飞书授权登录](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/authen-v1/authorize/get)（[这里有 One API 的实现细节阐述供参考](https://iamazing.cn/page/feishu-oauth-login)）。
-    + 支持 [GitHub 授权登录](https://github.com/settings/applications/new)。
-    + 微信公众号授权（需要额外部署 [WeChat Server](https://github.com/songquanpeng/wechat-server)）。
-23. 支持主题切换，设置环境变量 `THEME` 即可，默认为 `default`，欢迎 PR 更多主题，具体参考[此处](./web/README.md)。
-24. 配合 [Message Pusher](https://github.com/songquanpeng/message-pusher) 可将报警信息推送到多种 App 上。
+19. 支持通过系统访问令牌调用管理 API，进而**在无需二开的情况下扩展和自定义**功能，详情请参考 [API 文档](./docs/API.md)。
+20. 支持用户管理：用户名或邮箱 + 密码登录；注册 / 绑邮箱 / 重置密码使用邮箱验证码（需配置 SMTP）；可选邮箱域名白名单；管理员可后台开户。
+21. 前端仅保留 **default** 主题。
+22. 配合 [Message Pusher](https://github.com/songquanpeng/message-pusher) 可将报警信息推送到多种 App 上。
 
 ## 部署
 ### 基于 Docker 进行部署
@@ -383,38 +380,36 @@ graph LR
    + 例子：`SYNC_FREQUENCY=60`
 8. `NODE_TYPE`：设置之后将指定节点类型，可选值为 `master` 和 `slave`，未设置则默认为 `master`。
    + 例子：`NODE_TYPE=slave`
-9. `CHANNEL_UPDATE_FREQUENCY`：设置之后将定期更新渠道余额，单位为分钟，未设置则不进行更新。
-   + 例子：`CHANNEL_UPDATE_FREQUENCY=1440`
-10. `CHANNEL_TEST_FREQUENCY`：设置之后将定期检查渠道，单位为分钟，未设置则不进行检查。 
-   +例子：`CHANNEL_TEST_FREQUENCY=1440`
-11. `POLLING_INTERVAL`：批量更新渠道余额以及测试可用性时的请求间隔，单位为秒，默认无间隔。
+9. `CHANNEL_TEST_FREQUENCY`：设置之后将定期检查渠道，单位为分钟，未设置则不进行检查。
+    + 例子：`CHANNEL_TEST_FREQUENCY=1440`
+10. `POLLING_INTERVAL`：批量测试渠道可用性时的请求间隔，单位为秒，默认无间隔。
     + 例子：`POLLING_INTERVAL=5`
-12. `BATCH_UPDATE_ENABLED`：启用数据库批量更新聚合，会导致用户额度的更新存在一定的延迟可选值为 `true` 和 `false`，未设置则默认为 `false`。
+11. `BATCH_UPDATE_ENABLED`：启用数据库批量更新聚合，会导致用户额度的更新存在一定的延迟可选值为 `true` 和 `false`，未设置则默认为 `false`。
     + 例子：`BATCH_UPDATE_ENABLED=true`
     + 如果你遇到了数据库连接数过多的问题，可以尝试启用该选项。
-13. `BATCH_UPDATE_INTERVAL=5`：批量更新聚合的时间间隔，单位为秒，默认为 `5`。
+12. `BATCH_UPDATE_INTERVAL=5`：批量更新聚合的时间间隔，单位为秒，默认为 `5`。
     + 例子：`BATCH_UPDATE_INTERVAL=5`
-14. 请求频率限制：
+13. 请求频率限制：
     + `GLOBAL_API_RATE_LIMIT`：全局 API 速率限制（除中继请求外），单 ip 三分钟内的最大请求数，默认为 `180`。
     + `GLOBAL_WEB_RATE_LIMIT`：全局 Web 速率限制，单 ip 三分钟内的最大请求数，默认为 `60`。
-15. 编码器缓存设置：
+14. 编码器缓存设置：
     + `TIKTOKEN_CACHE_DIR`：默认程序启动时会联网下载一些通用的词元的编码，如：`gpt-3.5-turbo`，在一些网络环境不稳定，或者离线情况，可能会导致启动有问题，可以配置此目录缓存数据，可迁移到离线环境。
     + `DATA_GYM_CACHE_DIR`：目前该配置作用与 `TIKTOKEN_CACHE_DIR` 一致，但是优先级没有它高。
-16. `RELAY_TIMEOUT`：中继超时设置，单位为秒，默认不设置超时时间。
-17. `RELAY_PROXY`：设置后使用该代理来请求 API。
-18. `USER_CONTENT_REQUEST_TIMEOUT`：用户上传内容下载超时时间，单位为秒。
-19. `USER_CONTENT_REQUEST_PROXY`：设置后使用该代理来请求用户上传的内容，例如图片。
-20. `SQLITE_BUSY_TIMEOUT`：SQLite 锁等待超时设置，单位为毫秒，默认 `3000`。
-21. `GEMINI_SAFETY_SETTING`：Gemini 的安全设置，默认 `BLOCK_NONE`。
-22. `GEMINI_VERSION`：One API 所使用的 Gemini 版本，默认为 `v1`。
-23. `THEME`：系统的主题设置，默认为 `default`，具体可选值参考[此处](./web/README.md)。
-24. `ENABLE_METRIC`：是否根据请求成功率禁用渠道，默认不开启，可选值为 `true` 和 `false`。
-25. `METRIC_QUEUE_SIZE`：请求成功率统计队列大小，默认为 `10`。
-26. `METRIC_SUCCESS_RATE_THRESHOLD`：请求成功率阈值，默认为 `0.8`。
-27. `INITIAL_ROOT_TOKEN`：如果设置了该值，则在系统首次启动时会自动创建一个值为该环境变量值的 root 用户令牌。
-28. `INITIAL_ROOT_ACCESS_TOKEN`：如果设置了该值，则在系统首次启动时会自动创建一个值为该环境变量的 root 用户创建系统管理令牌。
-29. `ENFORCE_INCLUDE_USAGE`：是否强制在 stream 模型下返回 usage，默认不开启，可选值为 `true` 和 `false`。
-30. `TEST_PROMPT`：测试模型时的用户 prompt，默认为 `Print your model name exactly and do not output without any other text.`。
+15. `RELAY_TIMEOUT`：中继超时设置，单位为秒，默认不设置超时时间。
+16. `RELAY_PROXY`：设置后使用该代理来请求 API。
+17. `USER_CONTENT_REQUEST_TIMEOUT`：用户上传内容下载超时时间，单位为秒。
+18. `USER_CONTENT_REQUEST_PROXY`：设置后使用该代理来请求用户上传的内容，例如图片。
+19. `SQLITE_BUSY_TIMEOUT`：SQLite 锁等待超时设置，单位为毫秒，默认 `3000`。
+20. `GEMINI_SAFETY_SETTING`：Gemini 的安全设置，默认 `BLOCK_NONE`。
+21. `GEMINI_VERSION`：One API 所使用的 Gemini 版本，默认为 `v1`。
+22. `THEME`：运行时主题，仅支持 `default`，非法值回退为 `default`。无法在设置页修改。
+23. `ENABLE_METRIC`：是否根据请求成功率禁用渠道，默认不开启，可选值为 `true` 和 `false`。
+24. `METRIC_QUEUE_SIZE`：请求成功率统计队列大小，默认为 `10`。
+25. `METRIC_SUCCESS_RATE_THRESHOLD`：请求成功率阈值，默认为 `0.8`。
+26. `INITIAL_ROOT_TOKEN`：如果设置了该值，则在系统首次启动时会自动创建一个值为该环境变量值的 root 用户令牌。
+27. `INITIAL_ROOT_ACCESS_TOKEN`：如果设置了该值，则在系统首次启动时会自动创建一个值为该环境变量的 root 用户创建系统管理令牌。
+28. `ENFORCE_INCLUDE_USAGE`：是否强制在 stream 模型下返回 usage，默认不开启，可选值为 `true` 和 `false`。
+29. `TEST_PROMPT`：测试模型时的用户 prompt，默认为 `Print your model name exactly and do not output without any other text.`。
 
 ### 命令行参数
 1. `--port <port_number>`: 指定服务器监听的端口号，默认为 `3000`。

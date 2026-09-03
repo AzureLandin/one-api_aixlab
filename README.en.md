@@ -54,6 +54,8 @@ _✨ Access all LLM through the standard OpenAI API format, easy to deploy & use
 
 > **Note**: The latest image pulled from Docker may be an `alpha` release. Specify the version manually if you require stability.
 
+> **Note**: This repository is an internal-lab fork of One API. Redemption codes, online top-up, third-party login, Turnstile, and extra themes have been removed. Sign-in is username/email + password; registration and password reset use email verification codes. Admins grant quota. Spec: [docs/lab-internal-migration.md](./docs/lab-internal-migration.md). Management API: [docs/API.md](./docs/API.md). Existing databases: run [bin/migration_lab.sql](./bin/migration_lab.sql). Fresh installs use AutoMigrate.
+
 ## Features
 1. Support for multiple large models:
    + [x] [OpenAI ChatGPT Series Models](https://platform.openai.com/docs/guides/gpt/chat-completions-api) (Supports [Azure OpenAI API](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference))
@@ -66,24 +68,20 @@ _✨ Access all LLM through the standard OpenAI API format, easy to deploy & use
 3. Supports **stream mode** that enables typewriter-like effect through stream transmission.
 4. Supports **multi-machine deployment**. [See here](#multi-machine-deployment) for more details.
 5. Supports **token management** that allows setting token expiration time and usage count.
-6. Supports **voucher management** that enables batch generation and export of vouchers. Vouchers can be used for account balance replenishment.
+6. Supports **admin quota grants** (`POST /api/topup`) from the user edit page.
 7. Supports **channel management** that allows bulk creation of channels.
 8. Supports **user grouping** and **channel grouping** for setting different rates for different groups.
 9. Supports channel **model list configuration**.
 10. Supports **quota details checking**.
-11. Supports **user invite rewards**.
-12. Allows display of balance in USD.
-13. Supports announcement publishing, recharge link setting, and initial balance setting for new users.
-14. Offers rich **customization** options:
+11. Optionally display quota in USD (off by default).
+12. Supports announcement publishing and initial quota for new users.
+13. Offers rich **customization** options:
     1. Supports customization of system name, logo, and footer.
     2. Supports customization of homepage and about page using HTML & Markdown code, or embedding a standalone webpage through iframe.
-15. Supports management API access through system access tokens.
-16. Supports Cloudflare Turnstile user verification.
-17. Supports user management and multiple user login/registration methods:
-    + Email login/registration and password reset via email.
-    + [GitHub OAuth](https://github.com/settings/applications/new).
-    + WeChat Official Account authorization (requires additional deployment of [WeChat Server](https://github.com/songquanpeng/wechat-server)).
-18. Immediate support and encapsulation of other major model APIs as they become available.
+14. Supports management API access through system access tokens. See [API docs](./docs/API.md).
+15. User management: username or email + password login; registration / email bind / password reset via email verification code (SMTP required); optional email-domain whitelist; admins can create users.
+16. Frontend theme is **default** only.
+17. Immediate support and encapsulation of other major model APIs as they become available.
 
 ## Deployment
 ### Docker Deployment
@@ -250,16 +248,14 @@ If the channel ID is not provided, load balancing will be used to distribute the
     + Example: `SYNC_FREQUENCY=60`
 8. `NODE_TYPE`: When set, specifies the node type. Valid values are `master` and `slave`. If not set, it defaults to `master`.
     + Example: `NODE_TYPE=slave`
-9. `CHANNEL_UPDATE_FREQUENCY`: When set, it periodically updates the channel balances, with the unit in minutes. If not set, no update will happen.
-    + Example: `CHANNEL_UPDATE_FREQUENCY=1440`
-10. `CHANNEL_TEST_FREQUENCY`: When set, it periodically tests the channels, with the unit in minutes. If not set, no test will happen.
+9. `CHANNEL_TEST_FREQUENCY`: When set, it periodically tests the channels, with the unit in minutes. If not set, no test will happen.
     + Example: `CHANNEL_TEST_FREQUENCY=1440`
-11. `POLLING_INTERVAL`: The time interval (in seconds) between requests when updating channel balances and testing channel availability. Default is no interval.
+10. `POLLING_INTERVAL`: The time interval (in seconds) between requests when testing channel availability. Default is no interval.
     + Example: `POLLING_INTERVAL=5`
-12. `BATCH_UPDATE_ENABLED`: Enabling batch database update aggregation can cause a certain delay in updating user quotas. The optional values are 'true' and 'false', but if not set, it defaults to 'false'.
+11. `BATCH_UPDATE_ENABLED`: Enabling batch database update aggregation can cause a certain delay in updating user quotas. The optional values are 'true' and 'false', but if not set, it defaults to 'false'.
     +Example: ` BATCH_UPDATE_ENABLED=true`
     +If you encounter an issue with too many database connections, you can try enabling this option.
-13. `BATCH_UPDATE_INTERVAL=5`: The time interval for batch updating aggregates, measured in seconds, defaults to '5'.
+12. `BATCH_UPDATE_INTERVAL=5`: The time interval for batch updating aggregates, measured in seconds, defaults to '5'.
     +Example: ` BATCH_UPDATE_INTERVAL=5`
 14. Request frequency limit:
     + `GLOBAL_API_RATE_LIMIT`: Global API rate limit (excluding relay requests), the maximum number of requests within three minutes per IP, default to 180.
@@ -274,7 +270,7 @@ If the channel ID is not provided, load balancing will be used to distribute the
 20. `SQLITE_BUSY_TIMEOUT`: SQLite lock wait timeout setting, measured in milliseconds, default to '3000'.
 21. `GEMINI_SAFETY_SETTING`: Gemini's security settings are set to 'BLOCK-NONE' by default.
 22. `GEMINI_VERSION`: The Gemini version used by the One API, which defaults to 'v1'.
-23. `THE`: The system's theme setting, default to 'default', specific optional values refer to [here] (./web/README. md).
+23. `THEME`: Runtime theme. Only `default` is supported; invalid values fall back to `default`.
 24. `ENABLE_METRIC`: Whether to disable channels based on request success rate, default not enabled, optional values are 'true' and 'false'.
 25. `METRIC_QUEUE_SIZE`: Request success rate statistics queue size, default to '10'.
 26. `METRIC_SUCCESS_RATE_THRESHOLD`: Request success rate threshold, default to '0.8'.
