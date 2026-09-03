@@ -151,16 +151,6 @@ const ChannelsTable = () => {
         data.priority = parseInt(value);
         res = await API.put('/api/channel/', data);
         break;
-      case 'weight':
-        if (value === '') {
-          return;
-        }
-        data.weight = parseInt(value);
-        if (data.weight < 0) {
-          data.weight = 0;
-        }
-        res = await API.put('/api/channel/', data);
-        break;
     }
     const { success, message } = res.data;
     if (success) {

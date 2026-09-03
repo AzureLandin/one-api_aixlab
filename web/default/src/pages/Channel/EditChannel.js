@@ -43,7 +43,6 @@ const EditChannel = () => {
     type: 1,
     key: '',
     base_url: '',
-    other: '',
     model_mapping: '',
     system_prompt: '',
     models: [],
@@ -62,6 +61,9 @@ const EditChannel = () => {
     sk: '',
     ak: '',
     user_id: '',
+    api_version: '',
+    library_id: '',
+    plugin: '',
     vertex_ai_project_id: '',
     vertex_ai_adc: '',
   });
@@ -201,13 +203,15 @@ const EditChannel = () => {
         localInputs.base_url.length - 1
       );
     }
-    if (localInputs.type === 3 && localInputs.other === '') {
-      localInputs.other = '2024-03-01-preview';
-    }
     let res;
     localInputs.models = localInputs.models.join(',');
     localInputs.group = localInputs.groups.join(',');
-    localInputs.config = JSON.stringify(config);
+    let localConfig = { ...config };
+    if (localInputs.type === 3 && localConfig.api_version === '') {
+      // Azure 部署必须带 api-version，保留原来的兜底值
+      localConfig.api_version = '2024-03-01-preview';
+    }
+    localInputs.config = JSON.stringify(localConfig);
     if (isEdit) {
       res = await API.put(`/api/channel/`, {
         ...localInputs,
@@ -325,10 +329,10 @@ const EditChannel = () => {
                 <Form.Field>
                   <Form.Input
                     label='默认 API 版本'
-                    name='other'
+                    name='api_version'
                     placeholder='请输入默认 API 版本，例如：2024-03-01-preview，该配置可以被实际的请求查询参数所覆盖'
-                    onChange={handleInputChange}
-                    value={inputs.other}
+                    onChange={handleConfigChange}
+                    value={config.api_version}
                     autoComplete='new-password'
                   />
                 </Form.Field>
@@ -367,10 +371,10 @@ const EditChannel = () => {
               <Form.Field>
                 <Form.Input
                   label={t('channel.edit.spark_version')}
-                  name='other'
+                  name='api_version'
                   placeholder={t('channel.edit.spark_version_placeholder')}
-                  onChange={handleInputChange}
-                  value={inputs.other}
+                  onChange={handleConfigChange}
+                  value={config.api_version}
                   autoComplete='new-password'
                 />
               </Form.Field>
@@ -379,10 +383,10 @@ const EditChannel = () => {
               <Form.Field>
                 <Form.Input
                   label={t('channel.edit.knowledge_id')}
-                  name='other'
+                  name='library_id'
                   placeholder={t('channel.edit.knowledge_id_placeholder')}
-                  onChange={handleInputChange}
-                  value={inputs.other}
+                  onChange={handleConfigChange}
+                  value={config.library_id}
                   autoComplete='new-password'
                 />
               </Form.Field>
@@ -391,10 +395,10 @@ const EditChannel = () => {
               <Form.Field>
                 <Form.Input
                   label={t('channel.edit.plugin_param')}
-                  name='other'
+                  name='plugin'
                   placeholder={t('channel.edit.plugin_param_placeholder')}
-                  onChange={handleInputChange}
-                  value={inputs.other}
+                  onChange={handleConfigChange}
+                  value={config.plugin}
                   autoComplete='new-password'
                 />
               </Form.Field>
