@@ -9,7 +9,6 @@ import {
   Message,
   Modal,
 } from 'semantic-ui-react';
-import { Link } from 'react-router-dom';
 import { API, showError, showSuccess, verifyJSON } from '../helpers';
 import { marked } from 'marked';
 
@@ -22,7 +21,6 @@ const OtherSetting = () => {
     SystemName: '',
     Logo: '',
     HomePageContent: '',
-    Theme: '',
   });
   let [loading, setLoading] = useState(false);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
@@ -76,10 +74,6 @@ const OtherSetting = () => {
 
   const submitSystemName = async () => {
     await updateOption('SystemName', inputs.SystemName);
-  };
-
-  const submitTheme = async () => {
-    await updateOption('Theme', inputs.Theme);
   };
 
   const submitLogo = async () => {
@@ -146,26 +140,6 @@ const OtherSetting = () => {
           </Form.Group>
           <Form.Button onClick={submitSystemName}>
             {t('setting.other.system.buttons.save_name')}
-          </Form.Button>
-          <Form.Group widths='equal'>
-            <Form.Input
-              label={
-                <label>
-                  {t('setting.other.system.theme.title')}（
-                  <Link to='https://github.com/songquanpeng/one-api/blob/main/web/README.md'>
-                    {t('setting.other.system.theme.link')}
-                  </Link>
-                  ）
-                </label>
-              }
-              placeholder={t('setting.other.system.theme.placeholder')}
-              value={inputs.Theme}
-              name='Theme'
-              onChange={handleInputChange}
-            />
-          </Form.Group>
-          <Form.Button onClick={submitTheme}>
-            {t('setting.other.system.buttons.save_theme')}
           </Form.Button>
           <Form.Group widths='equal'>
             <Form.Input

@@ -530,15 +530,9 @@
         "name_placeholder": "请输入系统名称",
         "logo": "Logo 图片地址",
         "logo_placeholder": "在此输入 Logo 图片地址",
-        "theme": {
-          "title": "主题名称",
-          "link": "当前可用主题",
-          "placeholder": "请输入主题名称"
-        },
         "buttons": {
           "save_name": "设置系统名称",
-          "save_logo": "设置 Logo",
-          "save_theme": "设置主题（重启生效）"
+          "save_logo": "设置 Logo"
         }
       },
       "content": {

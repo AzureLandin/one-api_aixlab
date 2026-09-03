@@ -530,15 +530,9 @@
         "name_placeholder": "Please enter system name",
         "logo": "Logo Image URL",
         "logo_placeholder": "Enter Logo image URL here",
-        "theme": {
-          "title": "Theme Name",
-          "link": "Available Themes",
-          "placeholder": "Please enter theme name"
-        },
         "buttons": {
           "save_name": "Set System Name",
-          "save_logo": "Set Logo",
-          "save_theme": "Set Theme (Restart Required)"
+          "save_logo": "Set Logo"
         }
       },
       "content": {
