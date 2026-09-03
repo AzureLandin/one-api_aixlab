@@ -30,6 +30,11 @@ let headerButtons = [
     admin: true,
   },
   {
+    name: 'header.plaza',
+    to: '/plaza',
+    icon: 'cubes',
+  },
+  {
     name: 'header.token',
     to: '/token',
     icon: 'key',

@@ -683,15 +683,20 @@ func UpdateModelRatioByJSONString(jsonStr string) error {
 	return json.Unmarshal([]byte(jsonStr), &ModelRatio)
 }
 
+func normalizeRatioModelName(name string) string {
+	if strings.HasPrefix(name, "qwen-") && strings.HasSuffix(name, "-internet") {
+		return strings.TrimSuffix(name, "-internet")
+	}
+	if strings.HasPrefix(name, "command-") && strings.HasSuffix(name, "-internet") {
+		return strings.TrimSuffix(name, "-internet")
+	}
+	return name
+}
+
 func GetModelRatio(name string, channelType int) float64 {
 	modelRatioLock.RLock()
 	defer modelRatioLock.RUnlock()
-	if strings.HasPrefix(name, "qwen-") && strings.HasSuffix(name, "-internet") {
-		name = strings.TrimSuffix(name, "-internet")
-	}
-	if strings.HasPrefix(name, "command-") && strings.HasSuffix(name, "-internet") {
-		name = strings.TrimSuffix(name, "-internet")
-	}
+	name = normalizeRatioModelName(name)
 	model := fmt.Sprintf("%s(%d)", name, channelType)
 	if ratio, ok := ModelRatio[model]; ok {
 		return ratio
@@ -707,6 +712,26 @@ func GetModelRatio(name string, channelType int) float64 {
 	}
 	logger.SysError("model ratio not found: " + name)
 	return 30
+}
+
+func IsModelRatioConfigured(name string, channelType int) bool {
+	modelRatioLock.RLock()
+	defer modelRatioLock.RUnlock()
+	name = normalizeRatioModelName(name)
+	model := fmt.Sprintf("%s(%d)", name, channelType)
+	if _, ok := ModelRatio[model]; ok {
+		return true
+	}
+	if _, ok := DefaultModelRatio[model]; ok {
+		return true
+	}
+	if _, ok := ModelRatio[name]; ok {
+		return true
+	}
+	if _, ok := DefaultModelRatio[name]; ok {
+		return true
+	}
+	return false
 }
 
 func CompletionRatio2JSONString() string {

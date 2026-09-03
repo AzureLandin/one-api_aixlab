@@ -38,6 +38,47 @@ curl -X GET http://localhost:3000/api/channel/ \
 
 **GET** `/api/user/self`
 
+### 模型广场
+
+**GET** `/api/plaza/models`（需要登录）
+
+返回当前用户分组下可调用的模型、输入/输出费用（每 1K tokens 的额度消耗）、倍率，以及本分组已启用渠道（不含 Key / BaseURL / config）。
+
+```json
+{
+  "success": true,
+  "data": {
+    "group": "default",
+    "group_ratio": 1,
+    "quota_per_unit": 500000,
+    "display_in_currency": false,
+    "models": [
+      {
+        "name": "gpt-4o",
+        "model_ratio": 1.25,
+        "completion_ratio": 4,
+        "group_ratio": 1,
+        "input_quota_per_1k": 1250,
+        "output_quota_per_1k": 5000,
+        "ratio_configured": true,
+        "ratio_varies": false,
+        "channels": [
+          {
+            "id": 1,
+            "name": "openai-main",
+            "type": 1,
+            "status": 1,
+            "priority": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+费用计算：`input_quota_per_1k = 1000 × group_ratio × model_ratio`，`output_quota_per_1k = input_quota_per_1k × completion_ratio`。列表价取该模型优先级最高的渠道；若各渠道倍率不一致，`ratio_varies` 为 true。
+
 ### 为用户发放额度
 
 **POST** `/api/topup` （需要管理员权限）

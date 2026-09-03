@@ -23,6 +23,12 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), controller.ResetPassword)
 		apiRouter.POST("/topup", middleware.AdminAuth(), controller.AdminTopUp)
 
+		plazaRoute := apiRouter.Group("/plaza")
+		plazaRoute.Use(middleware.UserAuth())
+		{
+			plazaRoute.GET("/models", controller.GetPlazaModels)
+		}
+
 		userRoute := apiRouter.Group("/user")
 		{
 			userRoute.POST("/register", middleware.CriticalRateLimit(), controller.Register)

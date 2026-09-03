@@ -20,6 +20,7 @@ import EditChannel from './pages/Channel/EditChannel';
 import Log from './pages/Log';
 import Chat from './pages/Chat';
 import Dashboard from './pages/Dashboard';
+import Plaza from './pages/Plaza';
 
 const Home = lazy(() => import('./pages/Home'));
 const About = lazy(() => import('./pages/About'));
@@ -118,6 +119,14 @@ function App() {
           <Suspense fallback={<Loading></Loading>}>
             <EditChannel />
           </Suspense>
+        }
+      />
+      <Route
+        path='/plaza'
+        element={
+          <PrivateRoute>
+            <Plaza />
+          </PrivateRoute>
         }
       />
       <Route

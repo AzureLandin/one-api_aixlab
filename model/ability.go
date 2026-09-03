@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -109,4 +110,31 @@ func GetGroupModels(ctx context.Context, group string) ([]string, error) {
 	}
 	sort.Strings(models)
 	return models, err
+}
+
+// PlazaAbilityRow is a safe projection for the model plaza: no key, base_url, or config.
+type PlazaAbilityRow struct {
+	Model     string `gorm:"column:model"`
+	ChannelId int    `gorm:"column:channel_id"`
+	Priority  int64  `gorm:"column:priority"`
+	Name      string `gorm:"column:name"`
+	Type      int    `gorm:"column:type"`
+	Status    int    `gorm:"column:status"`
+}
+
+func GetGroupPlazaRows(group string) ([]PlazaAbilityRow, error) {
+	groupCol := "`group`"
+	trueVal := "1"
+	if common.UsingPostgreSQL {
+		groupCol = `"group"`
+		trueVal = "true"
+	}
+	var rows []PlazaAbilityRow
+	err := DB.Table("abilities").
+		Select("abilities.model, abilities.channel_id, COALESCE(abilities.priority, 0) as priority, channels.name, channels.type, channels.status").
+		Joins("JOIN channels ON channels.id = abilities.channel_id").
+		Where(fmt.Sprintf("abilities.%s = ? AND abilities.enabled = %s AND channels.status = ?", groupCol, trueVal), group, ChannelStatusEnabled).
+		Order("abilities.model ASC, abilities.priority DESC, channels.id ASC").
+		Find(&rows).Error
+	return rows, err
 }

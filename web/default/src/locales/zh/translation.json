@@ -2,6 +2,7 @@
   "header": {
     "home": "首页",
     "channel": "渠道",
+    "plaza": "模型广场",
     "token": "令牌",
     "user": "用户",
     "dashboard": "总览",
@@ -12,6 +13,31 @@
     "login": "登录",
     "logout": "注销",
     "register": "注册"
+  },
+  "plaza": {
+    "title": "模型广场",
+    "intro": "当前分组 {{group}}，分组倍率 {{ratio}}。费用为每 1K tokens，输入对应 prompt、输出对应 completion。",
+    "search_placeholder": "搜索模型名或渠道名",
+    "empty": "当前分组暂无可用模型，请联系管理员配置渠道。",
+    "load_failed": "加载模型广场失败",
+    "copied": "已复制模型名",
+    "copy_failed": "复制失败",
+    "unconfigured": "未配置倍率（默认 30）",
+    "ratio_varies": "渠道价格不同",
+    "columns": {
+      "model": "模型",
+      "input": "输入 / 1K",
+      "output": "输出 / 1K",
+      "ratio": "模型 × 补全 × 分组",
+      "channels": "渠道"
+    },
+    "channel": {
+      "name": "名称",
+      "type": "类型",
+      "status": "状态",
+      "priority": "优先级",
+      "enabled": "已启用"
+    }
   },
   "channel": {
     "title": "管理渠道",

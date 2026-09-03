@@ -2,6 +2,7 @@
   "header": {
     "home": "Home",
     "channel": "Channel",
+    "plaza": "Model Plaza",
     "token": "Token",
     "user": "User",
     "dashboard": "Dashboard",
@@ -12,6 +13,31 @@
     "login": "Login",
     "logout": "Logout",
     "register": "Register"
+  },
+  "plaza": {
+    "title": "Model Plaza",
+    "intro": "Current group {{group}}, group ratio {{ratio}}. Prices are per 1K tokens (input = prompt, output = completion).",
+    "search_placeholder": "Search by model or channel name",
+    "empty": "No models available in your group. Ask an admin to configure channels.",
+    "load_failed": "Failed to load model plaza",
+    "copied": "Model name copied",
+    "copy_failed": "Copy failed",
+    "unconfigured": "No ratio configured (default 30)",
+    "ratio_varies": "Channel prices differ",
+    "columns": {
+      "model": "Model",
+      "input": "Input / 1K",
+      "output": "Output / 1K",
+      "ratio": "Model × completion × group",
+      "channels": "Channels"
+    },
+    "channel": {
+      "name": "Name",
+      "type": "Type",
+      "status": "Status",
+      "priority": "Priority",
+      "enabled": "Enabled"
+    }
   },
   "channel": {
     "title": "Channel Management",
