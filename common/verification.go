@@ -19,7 +19,7 @@ const (
 
 var verificationMutex sync.Mutex
 var verificationMap map[string]verificationValue
-var verificationMapMaxSize = 10
+var verificationMapMaxSize = 1024
 var VerificationValidMinutes = 10
 
 func GenerateVerificationCode(length int) string {

@@ -12,7 +12,6 @@ import {
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { API, getLogo, showError, showInfo, showSuccess } from '../helpers';
-import Turnstile from 'react-turnstile';
 
 const RegisterForm = () => {
   const { t } = useTranslation();
@@ -23,31 +22,11 @@ const RegisterForm = () => {
     email: '',
     verification_code: '',
   });
-  const { username, password, password2 } = inputs;
-  const [showEmailVerification, setShowEmailVerification] = useState(false);
-  const [turnstileEnabled, setTurnstileEnabled] = useState(false);
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState('');
-  const [turnstileToken, setTurnstileToken] = useState('');
+  const { username, password, password2, email, verification_code } = inputs;
   const [loading, setLoading] = useState(false);
   const [disableButton, setDisableButton] = useState(false);
   const [countdown, setCountdown] = useState(30);
   const logo = getLogo();
-  let affCode = new URLSearchParams(window.location.search).get('aff');
-  if (affCode) {
-    localStorage.setItem('aff', affCode);
-  }
-
-  useEffect(() => {
-    let status = localStorage.getItem('status');
-    if (status) {
-      status = JSON.parse(status);
-      setShowEmailVerification(status.email_verification);
-      if (status.turnstile_check) {
-        setTurnstileEnabled(true);
-        setTurnstileSiteKey(status.turnstile_site_key);
-      }
-    }
-  });
 
   useEffect(() => {
     let countdownInterval = null;
@@ -66,7 +45,6 @@ const RegisterForm = () => {
 
   function handleChange(e) {
     const { name, value } = e.target;
-    console.log(name, value);
     setInputs((inputs) => ({ ...inputs, [name]: value }));
   }
 
@@ -79,20 +57,13 @@ const RegisterForm = () => {
       showInfo(t('messages.error.password_mismatch'));
       return;
     }
+    if (!email || !verification_code) {
+      showInfo(t('auth.register.email_required'));
+      return;
+    }
     if (username && password) {
-      if (turnstileEnabled && turnstileToken === '') {
-        showInfo(t('messages.error.turnstile_wait'));
-        return;
-      }
       setLoading(true);
-      if (!affCode) {
-        affCode = localStorage.getItem('aff');
-      }
-      inputs.aff_code = affCode;
-      const res = await API.post(
-        `/api/user/register?turnstile=${turnstileToken}`,
-        inputs
-      );
+      const res = await API.post(`/api/user/register`, inputs);
       const { success, message } = res.data;
       if (success) {
         navigate('/login');
@@ -106,15 +77,9 @@ const RegisterForm = () => {
 
   const sendVerificationCode = async () => {
     if (inputs.email === '') return;
-    if (turnstileEnabled && turnstileToken === '') {
-      showInfo(t('messages.error.turnstile_wait'));
-      return;
-    }
     setDisableButton(true);
     setLoading(true);
-    const res = await API.get(
-      `/api/verification?email=${inputs.email}&turnstile=${turnstileToken}`
-    );
+    const res = await API.get(`/api/verification?email=${inputs.email}`);
     const { success, message } = res.data;
     if (success) {
       showSuccess(t('messages.success.verification_code'));
@@ -175,54 +140,32 @@ const RegisterForm = () => {
                 type='password'
                 style={{ marginBottom: '1em' }}
               />
-
-              {showEmailVerification && (
-                <>
-                  <Form.Input
-                    fluid
-                    icon='mail'
-                    iconPosition='left'
-                    placeholder={t('auth.register.email')}
-                    onChange={handleChange}
-                    name='email'
-                    type='email'
-                    action={
-                      <Button onClick={sendVerificationCode} disabled={loading}>
-                        {disableButton
-                          ? t('auth.register.get_code_retry', { countdown })
-                          : t('auth.register.get_code')}
-                      </Button>
-                    }
-                    style={{ marginBottom: '1em' }}
-                  />
-                  <Form.Input
-                    fluid
-                    icon='lock'
-                    iconPosition='left'
-                    placeholder={t('auth.register.verification_code')}
-                    onChange={handleChange}
-                    name='verification_code'
-                    style={{ marginBottom: '1em' }}
-                  />
-                </>
-              )}
-
-              {turnstileEnabled && (
-                <div
-                  style={{
-                    marginBottom: '1em',
-                    display: 'flex',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <Turnstile
-                    sitekey={turnstileSiteKey}
-                    onVerify={(token) => {
-                      setTurnstileToken(token);
-                    }}
-                  />
-                </div>
-              )}
+              <Form.Input
+                fluid
+                icon='mail'
+                iconPosition='left'
+                placeholder={t('auth.register.email')}
+                onChange={handleChange}
+                name='email'
+                type='email'
+                action={
+                  <Button onClick={sendVerificationCode} disabled={loading}>
+                    {disableButton
+                      ? t('auth.register.get_code_retry', { countdown })
+                      : t('auth.register.get_code')}
+                  </Button>
+                }
+                style={{ marginBottom: '1em' }}
+              />
+              <Form.Input
+                fluid
+                icon='lock'
+                iconPosition='left'
+                placeholder={t('auth.register.verification_code')}
+                onChange={handleChange}
+                name='verification_code'
+                style={{ marginBottom: '1em' }}
+              />
 
               <Button
                 fluid

@@ -24,13 +24,6 @@ type LoginRequest struct {
 }
 
 func Login(c *gin.Context) {
-	if !config.PasswordLoginEnabled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "管理员关闭了密码登录",
-			"success": false,
-		})
-		return
-	}
 	var loginRequest LoginRequest
 	err := json.NewDecoder(c.Request.Body).Decode(&loginRequest)
 	if err != nil {
@@ -119,13 +112,6 @@ func Register(c *gin.Context) {
 		})
 		return
 	}
-	if !config.PasswordRegisterEnabled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "管理员关闭了通过密码进行注册，请使用第三方账户验证的形式进行注册",
-			"success": false,
-		})
-		return
-	}
 	var user model.User
 	err := json.NewDecoder(c.Request.Body).Decode(&user)
 	if err != nil {
@@ -142,34 +128,27 @@ func Register(c *gin.Context) {
 		})
 		return
 	}
-	if config.EmailVerificationEnabled {
-		if user.Email == "" || user.VerificationCode == "" {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "管理员开启了邮箱验证，请输入邮箱地址和验证码",
-			})
-			return
-		}
-		if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "验证码错误或已过期",
-			})
-			return
-		}
+	if user.Email == "" || user.VerificationCode == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "请输入邮箱地址和验证码",
+		})
+		return
 	}
-	affCode := user.AffCode // this code is the inviter's code, not the user's own code
-	inviterId, _ := model.GetUserIdByAffCode(affCode)
+	if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "验证码错误或已过期",
+		})
+		return
+	}
 	cleanUser := model.User{
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.Username,
-		InviterId:   inviterId,
+		Email:       user.Email,
 	}
-	if config.EmailVerificationEnabled {
-		cleanUser.Email = user.Email
-	}
-	if err := cleanUser.Insert(ctx, inviterId); err != nil {
+	if err := cleanUser.Insert(ctx); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -314,34 +293,6 @@ func GenerateAccessToken(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    user.AccessToken,
-	})
-	return
-}
-
-func GetAffCode(c *gin.Context) {
-	id := c.GetInt(ctxkey.Id)
-	user, err := model.GetUserById(id, true)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	if user.AffCode == "" {
-		user.AffCode = random.GetRandomString(4)
-		if err := user.Update(false); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    user.AffCode,
 	})
 	return
 }
@@ -573,7 +524,7 @@ func CreateUser(c *gin.Context) {
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
 	}
-	if err := cleanUser.Insert(ctx, 0); err != nil {
+	if err := cleanUser.Insert(ctx); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -743,38 +694,6 @@ func EmailBind(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-	})
-	return
-}
-
-type topUpRequest struct {
-	Key string `json:"key"`
-}
-
-func TopUp(c *gin.Context) {
-	ctx := c.Request.Context()
-	req := topUpRequest{}
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	id := c.GetInt("id")
-	quota, err := model.Redeem(ctx, req.Key, id)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    quota,
 	})
 	return
 }

@@ -456,16 +456,7 @@
       "binding": {
         "title": "Account Binding",
         "buttons": {
-          "bind_wechat": "Bind WeChat Account",
-          "bind_github": "Bind GitHub Account",
-          "bind_email": "Bind Email Address",
-          "bind_lark": "Bind Lark Account"
-        },
-        "wechat": {
-          "title": "WeChat Binding",
-          "description": "Scan QR code to follow the official account, enter 'verification code' to get the code (valid for 3 minutes)",
-          "verification_code": "Verification Code",
-          "bind": "Bind"
+          "bind_email": "Bind Email Address"
         },
         "email": {
           "title": "Bind Email Address",
@@ -498,13 +489,7 @@
       },
       "login": {
         "title": "Login & Registration Settings",
-        "password_login": "Allow Password Login",
-        "password_register": "Allow Password Registration",
-        "email_verification": "Require Email Verification for Password Registration",
-        "github_oauth": "Allow GitHub OAuth Login & Registration",
-        "wechat_login": "Allow WeChat Login & Registration",
-        "registration": "Allow New User Registration (When disabled, new users cannot register by any means)",
-        "turnstile": "Enable Turnstile User Verification"
+        "registration": "Allow New User Registration (When disabled, new users cannot register by any means)"
       },
       "email_restriction": {
         "title": "Email Domain Whitelist",
@@ -533,73 +518,6 @@
         "token_placeholder": "Sensitive information will not be sent to frontend",
         "buttons": {
           "save": "Save SMTP Settings"
-        }
-      },
-      "github": {
-        "title": "GitHub OAuth App Configuration",
-        "subtitle": "Used to support GitHub login and registration",
-        "manage_link": "Click here",
-        "manage_text": "to manage your GitHub OAuth Apps",
-        "url_notice": "Set Homepage URL to {{server_url}}, and Authorization callback URL to {{callback_url}}",
-        "client_id": "GitHub Client ID",
-        "client_id_placeholder": "Enter your registered GitHub OAuth APP ID",
-        "client_secret": "GitHub Client Secret",
-        "client_secret_placeholder": "Sensitive information will not be sent to frontend",
-        "buttons": {
-          "save": "Save GitHub OAuth Settings"
-        }
-      },
-      "lark": {
-        "title": "Lark OAuth Configuration",
-        "subtitle": "Used to support Lark login and registration",
-        "manage_link": "Click here",
-        "manage_text": "to manage your Lark applications",
-        "url_notice": "Set Homepage URL to {{server_url}}, and Redirect URL to {{callback_url}}",
-        "client_id": "App ID",
-        "client_id_placeholder": "Enter App ID",
-        "client_secret": "App Secret",
-        "client_secret_placeholder": "Sensitive information will not be sent to frontend",
-        "buttons": {
-          "save": "Save Lark OAuth Settings"
-        }
-      },
-      "wechat": {
-        "title": "WeChat Server Configuration",
-        "subtitle": "Used to support WeChat login and registration",
-        "learn_more": "Learn about WeChat Server",
-        "server_address": "WeChat Server Address",
-        "server_address_placeholder": "e.g.: https://yourdomain.com",
-        "token": "WeChat Server Access Token",
-        "token_placeholder": "Sensitive information will not be sent to frontend",
-        "qrcode": "WeChat Official Account QR Code Image URL",
-        "qrcode_placeholder": "Enter an image URL",
-        "buttons": {
-          "save": "Save WeChat Server Settings"
-        },
-        "scan_tip": "Scan QR code to follow WeChat Official Account, enter 'code' to get verification code (valid for 3 minutes)",
-        "code_placeholder": "Verification code"
-      },
-      "turnstile": {
-        "title": "Turnstile Configuration",
-        "subtitle": "Used to support user verification",
-        "manage_link": "Click here",
-        "manage_text": "to manage your Turnstile Sites, Invisible Widget Type recommended",
-        "site_key": "Turnstile Site Key",
-        "site_key_placeholder": "Enter your registered Turnstile Site Key",
-        "secret_key": "Turnstile Secret Key",
-        "secret_key_placeholder": "Sensitive information will not be sent to frontend",
-        "buttons": {
-          "save": "Save Turnstile Settings"
-        }
-      },
-      "password_login": {
-        "warning": {
-          "title": "Warning",
-          "content": "Disabling password login will prevent all users (including administrators) who haven't bound other login methods from logging in via password. Confirm disable?",
-          "buttons": {
-            "confirm": "Confirm",
-            "cancel": "Cancel"
-          }
         }
       }
     },
@@ -748,15 +666,6 @@
         "source": "Source: ",
         "source_link": "GitHub Repository",
         "start_time": "Start Time: "
-      },
-      "config": {
-        "title": "System Configuration",
-        "email_verify": "Email Verification: ",
-        "github_oauth": "GitHub OAuth: ",
-        "wechat_login": "WeChat Login: ",
-        "turnstile": "Turnstile Check: ",
-        "enabled": "Enabled",
-        "disabled": "Disabled"
       }
     },
     "loading_failed": "Failed to load homepage content..."
@@ -770,12 +679,7 @@
       "forgot_password": "Forgot password?",
       "reset_password": "Reset",
       "no_account": "No account?",
-      "register": "Register",
-      "other_methods": "Other login methods",
-      "wechat": {
-        "scan_tip": "Scan QR code to follow WeChat Official Account, enter 'code' to get verification code (valid for 3 minutes)",
-        "code_placeholder": "Verification code"
-      }
+      "register": "Register"
     },
     "register": {
       "title": "New User Registration",
@@ -788,20 +692,19 @@
       "get_code_retry": "Retry ({{countdown}})",
       "button": "Register",
       "has_account": "Have an account?",
-      "login": "Login"
+      "login": "Login",
+      "email_required": "Please enter your email address and verification code"
     },
     "reset": {
       "title": "Password Reset",
       "email": "Email address",
-      "button": "Submit",
-      "notice": "The system will send an email containing a reset link to your mailbox. Please check your email.",
-      "confirm": {
-        "title": "Password Reset Confirmation",
-        "new_password": "New password",
-        "button": "Submit",
-        "button_disabled": "Password reset completed",
-        "notice": "New password has been generated, please click the password field or button above to copy. Please login and change your password as soon as possible!"
-      }
+      "get_code": "Get code",
+      "verification_code": "Email verification code",
+      "new_password": "New password (8-20 characters)",
+      "confirm_password": "Confirm new password",
+      "input_code": "Please enter your email address and verification code",
+      "button": "Reset password",
+      "notice": "The system will send a 6-digit verification code to your mailbox."
     }
   },
   "about": {
@@ -815,17 +718,14 @@
       "login": "Login successful!",
       "register": "Registration successful!",
       "verification_code": "Verification code sent, please check your email!",
-      "password_reset": "Reset email sent, please check your inbox!"
+      "password_reset_code": "Reset code sent, please check your inbox!",
+      "password_reset": "Password reset successfully, please login again!"
     },
     "error": {
       "login_expired": "Not logged in or session expired, please login again!",
       "password_length": "Password must be at least 8 characters!",
       "password_mismatch": "Passwords do not match",
-      "turnstile_wait": "Please wait a few seconds, Turnstile is checking the environment!",
       "root_password": "Please change the default password immediately!"
-    },
-    "notice": {
-      "password_copied": "New password copied to clipboard: {{password}}"
     }
   }
 }

@@ -77,7 +77,7 @@ const Home = () => {
               <Card.Header>
                 <Header as='h3'>{t('home.system_status.title')}</Header>
               </Card.Header>
-              <Grid columns={2} stackable>
+              <Grid stackable>
                 <Grid.Column>
                   <Card
                     fluid
@@ -152,122 +152,6 @@ const Home = () => {
                             {t('home.system_status.info.start_time')}
                           </span>
                           <span>{getStartTimeString()}</span>
-                        </p>
-                      </Card.Description>
-                    </Card.Content>
-                  </Card>
-                </Grid.Column>
-
-                <Grid.Column>
-                  <Card
-                    fluid
-                    className='chart-card'
-                    style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.12)' }}
-                  >
-                    <Card.Content>
-                      <Card.Header>
-                        <Header as='h3' style={{ color: '#444' }}>
-                          {t('home.system_status.config.title')}
-                        </Header>
-                      </Card.Header>
-                      <Card.Description
-                        style={{ lineHeight: '2', marginTop: '1em' }}
-                      >
-                        <p
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5em',
-                          }}
-                        >
-                          <i className='envelope icon'></i>
-                          <span style={{ fontWeight: 'bold' }}>
-                            {t('home.system_status.config.email_verify')}
-                          </span>
-                          <span
-                            style={{
-                              color: statusState?.status?.email_verification
-                                ? '#21ba45'
-                                : '#db2828',
-                              fontWeight: '500',
-                            }}
-                          >
-                            {statusState?.status?.email_verification
-                              ? t('home.system_status.config.enabled')
-                              : t('home.system_status.config.disabled')}
-                          </span>
-                        </p>
-                        <p
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5em',
-                          }}
-                        >
-                          <i className='github icon'></i>
-                          <span style={{ fontWeight: 'bold' }}>
-                            {t('home.system_status.config.github_oauth')}
-                          </span>
-                          <span
-                            style={{
-                              color: statusState?.status?.github_oauth
-                                ? '#21ba45'
-                                : '#db2828',
-                              fontWeight: '500',
-                            }}
-                          >
-                            {statusState?.status?.github_oauth
-                              ? t('home.system_status.config.enabled')
-                              : t('home.system_status.config.disabled')}
-                          </span>
-                        </p>
-                        <p
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5em',
-                          }}
-                        >
-                          <i className='wechat icon'></i>
-                          <span style={{ fontWeight: 'bold' }}>
-                            {t('home.system_status.config.wechat_login')}
-                          </span>
-                          <span
-                            style={{
-                              color: statusState?.status?.wechat_login
-                                ? '#21ba45'
-                                : '#db2828',
-                              fontWeight: '500',
-                            }}
-                          >
-                            {statusState?.status?.wechat_login
-                              ? t('home.system_status.config.enabled')
-                              : t('home.system_status.config.disabled')}
-                          </span>
-                        </p>
-                        <p
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5em',
-                          }}
-                        >
-                          <i className='shield alternate icon'></i>
-                          <span style={{ fontWeight: 'bold' }}>
-                            {t('home.system_status.config.turnstile')}
-                          </span>
-                          <span
-                            style={{
-                              color: statusState?.status?.turnstile_check
-                                ? '#21ba45'
-                                : '#db2828',
-                              fontWeight: '500',
-                            }}
-                          >
-                            {statusState?.status?.turnstile_check
-                              ? t('home.system_status.config.enabled')
-                              : t('home.system_status.config.disabled')}
-                          </span>
                         </p>
                       </Card.Description>
                     </Card.Content>

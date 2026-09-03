@@ -8,34 +8,24 @@ import {
   Card,
   Message,
 } from 'semantic-ui-react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { API, getLogo, showError, showInfo, showSuccess } from '../helpers';
-import Turnstile from 'react-turnstile';
 
 const PasswordResetForm = () => {
   const { t } = useTranslation();
   const [inputs, setInputs] = useState({
     email: '',
+    token: '',
+    password: '',
+    password2: '',
   });
-  const { email } = inputs;
+  const { email, token, password, password2 } = inputs;
   const [loading, setLoading] = useState(false);
-  const [turnstileEnabled, setTurnstileEnabled] = useState(false);
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState('');
-  const [turnstileToken, setTurnstileToken] = useState('');
   const [disableButton, setDisableButton] = useState(false);
   const [countdown, setCountdown] = useState(30);
   const logo = getLogo();
-
-  useEffect(() => {
-    let status = localStorage.getItem('status');
-    if (status) {
-      status = JSON.parse(status);
-      if (status.turnstile_check) {
-        setTurnstileEnabled(true);
-        setTurnstileSiteKey(status.turnstile_site_key);
-      }
-    }
-  }, []);
+  let navigate = useNavigate();
 
   useEffect(() => {
     let countdownInterval = null;
@@ -55,25 +45,47 @@ const PasswordResetForm = () => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
   }
 
-  async function handleSubmit(e) {
-    setDisableButton(true);
+  const sendVerificationCode = async () => {
     if (!email) return;
-    if (turnstileEnabled && turnstileToken === '') {
-      showInfo('请稍后几秒重试，Turnstile 正在检查用户环境！');
-      return;
-    }
+    setDisableButton(true);
     setLoading(true);
-    const res = await API.get(
-      `/api/reset_password?email=${email}&turnstile=${turnstileToken}`
-    );
+    const res = await API.get(`/api/reset_password?email=${email}`);
     const { success, message } = res.data;
     if (success) {
-      showSuccess(t('auth.reset.notice'));
-      setInputs({ ...inputs, email: '' });
+      showSuccess(t('messages.success.password_reset_code'));
     } else {
       showError(message);
       setDisableButton(false);
       setCountdown(30);
+    }
+    setLoading(false);
+  };
+
+  async function handleSubmit() {
+    if (!email || !token) {
+      showInfo(t('auth.reset.input_code'));
+      return;
+    }
+    if (password.length < 8) {
+      showInfo(t('messages.error.password_length'));
+      return;
+    }
+    if (password !== password2) {
+      showInfo(t('messages.error.password_mismatch'));
+      return;
+    }
+    setLoading(true);
+    const res = await API.post(`/api/user/reset`, {
+      email,
+      token,
+      password,
+    });
+    const { success, message } = res.data;
+    if (success) {
+      showSuccess(t('messages.success.password_reset'));
+      navigate('/login');
+    } else {
+      showError(message);
     }
     setLoading(false);
   }
@@ -104,42 +116,66 @@ const PasswordResetForm = () => {
                 iconPosition='left'
                 placeholder={t('auth.reset.email')}
                 name='email'
+                type='email'
                 value={email}
+                onChange={handleChange}
+                action={
+                  <Button
+                    onClick={sendVerificationCode}
+                    disabled={loading || disableButton}
+                  >
+                    {disableButton
+                      ? t('auth.register.get_code_retry', { countdown })
+                      : t('auth.reset.get_code')}
+                  </Button>
+                }
+                style={{ marginBottom: '1em' }}
+              />
+              <Form.Input
+                fluid
+                icon='key'
+                iconPosition='left'
+                placeholder={t('auth.reset.verification_code')}
+                name='token'
+                value={token}
                 onChange={handleChange}
                 style={{ marginBottom: '1em' }}
               />
-              {turnstileEnabled && (
-                <div
-                  style={{
-                    marginBottom: '1em',
-                    display: 'flex',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <Turnstile
-                    sitekey={turnstileSiteKey}
-                    onVerify={(token) => {
-                      setTurnstileToken(token);
-                    }}
-                  />
-                </div>
-              )}
+              <Form.Input
+                fluid
+                icon='lock'
+                iconPosition='left'
+                placeholder={t('auth.reset.new_password')}
+                name='password'
+                type='password'
+                value={password}
+                onChange={handleChange}
+                style={{ marginBottom: '1em' }}
+              />
+              <Form.Input
+                fluid
+                icon='lock'
+                iconPosition='left'
+                placeholder={t('auth.reset.confirm_password')}
+                name='password2'
+                type='password'
+                value={password2}
+                onChange={handleChange}
+                style={{ marginBottom: '1.5em' }}
+              />
               <Button
                 color='blue'
                 fluid
                 size='large'
                 onClick={handleSubmit}
                 loading={loading}
-                disabled={disableButton}
                 style={{
                   background: '#2F73FF', // 使用更现代的蓝色
                   color: 'white',
                   marginBottom: '1.5em',
                 }}
               >
-                {disableButton
-                  ? t('auth.register.get_code_retry', { countdown })
-                  : t('auth.reset.button')}
+                {t('auth.reset.button')}
               </Button>
             </Form>
             <Message style={{ background: 'transparent', boxShadow: 'none' }}>

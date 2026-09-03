@@ -456,16 +456,7 @@
       "binding": {
         "title": "账号绑定",
         "buttons": {
-          "bind_wechat": "绑定微信账号",
-          "bind_github": "绑定 GitHub 账号",
-          "bind_email": "绑定邮箱地址",
-          "bind_lark": "绑定飞书账号"
-        },
-        "wechat": {
-          "title": "微信绑定",
-          "description": "微信扫码关注公众号，输入「验证码」获取验证码（三分钟内有效）",
-          "verification_code": "验证码",
-          "bind": "绑定"
+          "bind_email": "绑定邮箱地址"
         },
         "email": {
           "title": "绑定邮箱地址",
@@ -498,13 +489,7 @@
       },
       "login": {
         "title": "配置登录注册",
-        "password_login": "允许通过密码进行登录",
-        "password_register": "允许通过密码进行注册",
-        "email_verification": "通过密码注册时需要进行邮箱验证",
-        "github_oauth": "允许通过 GitHub 账户登录 & 注册",
-        "wechat_login": "允许通过微信登录 & 注册",
-        "registration": "允许新用户注册（此项为否时，新用户将无法以任何方式进行注册）",
-        "turnstile": "启用 Turnstile 用户校验"
+        "registration": "允许新用户注册（此项为否时，新用户将无法以任何方式进行注册）"
       },
       "email_restriction": {
         "title": "配置邮箱域名白名单",
@@ -533,71 +518,6 @@
         "token_placeholder": "敏感信息不会发送到前端显示",
         "buttons": {
           "save": "保存 SMTP 设置"
-        }
-      },
-      "github": {
-        "title": "配置 GitHub OAuth App",
-        "subtitle": "用以支持通过 GitHub 进行登录注册",
-        "manage_link": "点击此处",
-        "manage_text": "管理你的 GitHub OAuth App",
-        "url_notice": "Homepage URL 填 {{server_url}}，Authorization callback URL 填 {{callback_url}}",
-        "client_id": "GitHub Client ID",
-        "client_id_placeholder": "输入你注册的 GitHub OAuth APP 的 ID",
-        "client_secret": "GitHub Client Secret",
-        "client_secret_placeholder": "敏感信息不会发送到前端显示",
-        "buttons": {
-          "save": "保存 GitHub OAuth 设置"
-        }
-      },
-      "lark": {
-        "title": "配置飞书授权登录",
-        "subtitle": "用以支持通过飞书进行登录注册",
-        "manage_link": "点击此处",
-        "manage_text": "管理你的飞书应用",
-        "url_notice": "主页链接填 {{server_url}}，重定向 URL 填 {{callback_url}}",
-        "client_id": "App ID",
-        "client_id_placeholder": "输入 App ID",
-        "client_secret": "App Secret",
-        "client_secret_placeholder": "敏感信息不会发送到前端显示",
-        "buttons": {
-          "save": "保存飞书 OAuth 设置"
-        }
-      },
-      "wechat": {
-        "title": "配置 WeChat Server",
-        "subtitle": "用以支持通过微信进行登录注册",
-        "learn_more": "了解 WeChat Server",
-        "server_address": "WeChat Server 服务器地址",
-        "server_address_placeholder": "例如：https://yourdomain.com",
-        "token": "WeChat Server 访问凭证",
-        "token_placeholder": "敏感信息不会发送到前端显示",
-        "qrcode": "微信公众号二维码图片链接",
-        "qrcode_placeholder": "输入一个图片链接",
-        "buttons": {
-          "save": "保存 WeChat Server 设置"
-        }
-      },
-      "turnstile": {
-        "title": "配置 Turnstile",
-        "subtitle": "用以支持用户校验",
-        "manage_link": "点击此处",
-        "manage_text": "管理你的 Turnstile Sites，推荐选择 Invisible Widget Type",
-        "site_key": "Turnstile Site Key",
-        "site_key_placeholder": "输入你注册的 Turnstile Site Key",
-        "secret_key": "Turnstile Secret Key",
-        "secret_key_placeholder": "敏感信息不会发送到前端显示",
-        "buttons": {
-          "save": "保存 Turnstile 设置"
-        }
-      },
-      "password_login": {
-        "warning": {
-          "title": "警告",
-          "content": "取消密码登录将导致所有未绑定其他登录方式的用户（包括管理员）无法通过密码登录，确认取消？",
-          "buttons": {
-            "confirm": "确定",
-            "cancel": "取消"
-          }
         }
       }
     },
@@ -750,15 +670,6 @@
         "source": "源码：",
         "source_link": "GitHub 仓库",
         "start_time": "启动时间："
-      },
-      "config": {
-        "title": "系统配置",
-        "email_verify": "邮箱验证：",
-        "github_oauth": "GitHub 身份验证：",
-        "wechat_login": "微信身份验证：",
-        "turnstile": "Turnstile 校验：",
-        "enabled": "已启用",
-        "disabled": "未启用"
       }
     },
     "loading_failed": "加载首页内容失败..."
@@ -772,12 +683,7 @@
       "forgot_password": "忘记密码？",
       "reset_password": "点击重置",
       "no_account": "没有账户？",
-      "register": "点击注册",
-      "other_methods": "使用其他方式登录",
-      "wechat": {
-        "scan_tip": "微信扫码关注公众号，输入「验证码」获取验证码（三分钟内有效）",
-        "code_placeholder": "验证码"
-      }
+      "register": "点击注册"
     },
     "register": {
       "title": "新用户注册",
@@ -790,20 +696,19 @@
       "get_code_retry": "重试 ({{countdown}})",
       "button": "注册",
       "has_account": "已有账户？",
-      "login": "点击登录"
+      "login": "点击登录",
+      "email_required": "请输入邮箱地址和验证码"
     },
     "reset": {
       "title": "密码重置",
       "email": "邮箱地址",
-      "button": "提交",
-      "notice": "系统将向您的邮箱发送一封包含重置链接的邮件，请注意查收。",
-      "confirm": {
-        "title": "密码重置确认",
-        "new_password": "新密码",
-        "button": "提交",
-        "button_disabled": "密码重置完成",
-        "notice": "新密码已生成，请点击密码框或上方按钮复制。请及时登录并修改密码！"
-      }
+      "get_code": "获取验证码",
+      "verification_code": "输入邮箱验证码",
+      "new_password": "输入新密码，最短 8 位，最长 20 位",
+      "confirm_password": "再次输入新密码",
+      "input_code": "请输入邮箱地址和验证码",
+      "button": "重置密码",
+      "notice": "系统将向您的邮箱发送 6 位验证码，请注意查收。"
     }
   },
   "messages": {
@@ -811,17 +716,14 @@
       "login": "登录成功！",
       "register": "注册成功！",
       "verification_code": "验证码发送成功，请检查你的邮箱！",
-      "password_reset": "重置邮件发送成功，请检查邮箱！"
+      "password_reset_code": "重置验证码发送成功，请检查邮箱！",
+      "password_reset": "密码重置成功，请重新登录！"
     },
     "error": {
       "login_expired": "未登录或登录已过期，请重新登录！",
       "password_length": "密码长度不得小于 8 位！",
       "password_mismatch": "两次输入的密码不一致",
-      "turnstile_wait": "请稍后几秒重试，Turnstile 正在检查用户环境！",
       "root_password": "请立刻修改默认密码！"
-    },
-    "notice": {
-      "password_copied": "新密码已复制到剪贴板：{{password}}"
     }
   }
 }

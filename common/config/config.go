@@ -16,10 +16,9 @@ var SystemName = "One API"
 var ServerAddress = "http://localhost:3000"
 var Footer = ""
 var Logo = ""
-var TopUpLink = ""
 var ChatLink = ""
 var QuotaPerUnit = 500 * 1000.0 // $0.002 / 1K tokens
-var DisplayInCurrencyEnabled = true
+var DisplayInCurrencyEnabled = false
 var DisplayTokenStatEnabled = true
 
 // Any options with "Secret", "Token" in its key won't be return by GetOptions
@@ -32,13 +31,6 @@ var OptionMapRWMutex sync.RWMutex
 var ItemsPerPage = 10
 var MaxRecentItems = 100
 
-var PasswordLoginEnabled = true
-var PasswordRegisterEnabled = true
-var EmailVerificationEnabled = false
-var GitHubOAuthEnabled = false
-var OidcEnabled = false
-var WeChatAuthEnabled = false
-var TurnstileCheckEnabled = false
 var RegisterEnabled = true
 
 var EmailDomainRestrictionEnabled = false
@@ -66,32 +58,10 @@ var SMTPAccount = ""
 var SMTPFrom = ""
 var SMTPToken = ""
 
-var GitHubClientId = ""
-var GitHubClientSecret = ""
-
-var LarkClientId = ""
-var LarkClientSecret = ""
-
-var OidcClientId = ""
-var OidcClientSecret = ""
-var OidcWellKnown = ""
-var OidcAuthorizationEndpoint = ""
-var OidcTokenEndpoint = ""
-var OidcUserinfoEndpoint = ""
-
-var WeChatServerAddress = ""
-var WeChatServerToken = ""
-var WeChatAccountQRCodeImageURL = ""
-
 var MessagePusherAddress = ""
 var MessagePusherToken = ""
 
-var TurnstileSiteKey = ""
-var TurnstileSecretKey = ""
-
 var QuotaForNewUser int64 = 0
-var QuotaForInviter int64 = 0
-var QuotaForInvitee int64 = 0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
@@ -119,8 +89,13 @@ var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
 var Theme = env.String("THEME", "default")
 var ValidThemes = map[string]bool{
 	"default": true,
-	"berry":   true,
-	"air":     true,
+}
+
+// Theme 只能通过环境变量指定，且仅支持 default；非法值一律回退到 default。
+func init() {
+	if !ValidThemes[Theme] {
+		Theme = "default"
+	}
 }
 
 // All duration's unit is seconds

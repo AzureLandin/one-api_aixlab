@@ -117,7 +117,9 @@ func DeleteUserById(id int) (err error) {
 	return user.Delete()
 }
 
-func (user *User) Insert(ctx context.Context, inviterId int) error {
+// Insert 创建一个新用户并赠送初始额度，同时为其创建一个默认令牌。
+// 本系统面向课题组内网，已移除邀请码返利逻辑。
+func (user *User) Insert(ctx context.Context) error {
 	var err error
 	if user.Password != "" {
 		user.Password, err = common.Password2Hash(user.Password)
@@ -127,23 +129,12 @@ func (user *User) Insert(ctx context.Context, inviterId int) error {
 	}
 	user.Quota = config.QuotaForNewUser
 	user.AccessToken = random.GetUUID()
-	user.AffCode = random.GetRandomString(4)
 	result := DB.Create(user)
 	if result.Error != nil {
 		return result.Error
 	}
 	if config.QuotaForNewUser > 0 {
 		RecordLog(ctx, user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", common.LogQuota(config.QuotaForNewUser)))
-	}
-	if inviterId != 0 {
-		if config.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, config.QuotaForInvitee)
-			RecordLog(ctx, user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", common.LogQuota(config.QuotaForInvitee)))
-		}
-		if config.QuotaForInviter > 0 {
-			_ = IncreaseUserQuota(inviterId, config.QuotaForInviter)
-			RecordLog(ctx, inviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", common.LogQuota(config.QuotaForInviter)))
-		}
 	}
 	// create default token
 	cleanToken := Token{
