@@ -14,7 +14,7 @@ import {
 } from '../helpers';
 
 import {CHANNEL_OPTIONS, ITEMS_PER_PAGE} from '../constants';
-import {renderGroup, renderNumber} from '../helpers/render';
+import { renderGroup } from '../helpers/render';
 
 function renderTimestamp(timestamp) {
   return <>{timestamp2string(timestamp)}</>;
@@ -41,36 +41,6 @@ function renderType(type, t) {
   );
 }
 
-function renderBalance(type, balance, t) {
-  switch (type) {
-    case 1: // OpenAI
-        if (balance === 0) {
-            return <span>{t('channel.table.balance_not_supported')}</span>;
-        }
-      return <span>${balance.toFixed(2)}</span>;
-    case 4: // CloseAI
-      return <span>¥{balance.toFixed(2)}</span>;
-    case 8: // 自定义
-      return <span>${balance.toFixed(2)}</span>;
-    case 5: // OpenAI-SB
-      return <span>¥{(balance / 10000).toFixed(2)}</span>;
-    case 10: // AI Proxy
-      return <span>{renderNumber(balance)}</span>;
-    case 12: // API2GPT
-      return <span>¥{balance.toFixed(2)}</span>;
-    case 13: // AIGC2D
-      return <span>{renderNumber(balance)}</span>;
-    case 20: // OpenRouter
-      return <span>${balance.toFixed(2)}</span>;
-    case 36: // DeepSeek
-      return <span>¥{balance.toFixed(2)}</span>;
-    case 44: // SiliconFlow
-      return <span>¥{balance.toFixed(2)}</span>;
-    default:
-      return <span>{t('channel.table.balance_not_supported')}</span>;
-  }
-}
-
 function isShowDetail() {
   return localStorage.getItem('show_detail') === 'true';
 }
@@ -84,7 +54,6 @@ const ChannelsTable = () => {
   const [activePage, setActivePage] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
-  const [updatingBalance, setUpdatingBalance] = useState(false);
   const [showPrompt, setShowPrompt] = useState(shouldShowPrompt(promptID));
   const [showDetail, setShowDetail] = useState(isShowDetail());
 
@@ -359,33 +328,6 @@ const ChannelsTable = () => {
     }
   };
 
-  const updateChannelBalance = async (id, name, idx) => {
-    const res = await API.get(`/api/channel/update_balance/${id}/`);
-    const { success, message, balance } = res.data;
-    if (success) {
-      let newChannels = [...channels];
-      let realIdx = (activePage - 1) * ITEMS_PER_PAGE + idx;
-      newChannels[realIdx].balance = balance;
-      newChannels[realIdx].balance_updated_time = Date.now() / 1000;
-      setChannels(newChannels);
-      showSuccess(t('channel.messages.balance_update_success', { name }));
-    } else {
-      showError(message);
-    }
-  };
-
-  const updateAllChannelsBalance = async () => {
-    setUpdatingBalance(true);
-    const res = await API.get(`/api/channel/update_balance`);
-    const { success, message } = res.data;
-    if (success) {
-      showInfo(t('channel.messages.all_balance_updated'));
-    } else {
-      showError(message);
-    }
-    setUpdatingBalance(false);
-  };
-
   const handleKeywordChange = async (e, { value }) => {
     setSearchKeyword(value.trim());
   };
@@ -430,8 +372,6 @@ const ChannelsTable = () => {
             setPromptShown(promptID);
           }}
         >
-          {t('channel.balance_notice')}
-          <br />
           {t('channel.test_notice')}
           <br />
           {t('channel.detail_notice')}
@@ -491,14 +431,6 @@ const ChannelsTable = () => {
             <Table.HeaderCell
               style={{ cursor: 'pointer' }}
               onClick={() => {
-                sortChannel('balance');
-              }}
-            >
-              {t('channel.table.balance')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
                 sortChannel('priority');
               }}
               hidden={!showDetail}
@@ -538,22 +470,6 @@ const ChannelsTable = () => {
                       }
                       key={channel.id}
                       trigger={renderResponseTime(channel.response_time, t)}
-                      basic
-                    />
-                  </Table.Cell>
-                  <Table.Cell>
-                    <Popup
-                      trigger={
-                        <span
-                          onClick={() => {
-                            updateChannelBalance(channel.id, channel.name, idx);
-                          }}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          {renderBalance(channel.type, channel.balance, t)}
-                        </span>
-                      }
-                      content={t('channel.table.click_to_update')}
                       basic
                     />
                   </Table.Cell>

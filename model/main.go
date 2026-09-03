@@ -148,9 +148,6 @@ func migrateDB() error {
 	if err = DB.AutoMigrate(&Option{}); err != nil {
 		return err
 	}
-	if err = DB.AutoMigrate(&Redemption{}); err != nil {
-		return err
-	}
 	if err = DB.AutoMigrate(&Ability{}); err != nil {
 		return err
 	}

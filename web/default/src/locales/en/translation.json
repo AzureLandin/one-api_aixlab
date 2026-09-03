@@ -3,8 +3,6 @@
     "home": "Home",
     "channel": "Channel",
     "token": "Token",
-    "redemption": "Redemption",
-    "topup": "Top Up",
     "user": "User",
     "dashboard": "Dashboard",
     "log": "Log",
@@ -15,30 +13,9 @@
     "logout": "Logout",
     "register": "Register"
   },
-  "topup": {
-    "title": "Top Up Center",
-    "get_code": {
-      "title": "Get Redemption Code",
-      "current_quota": "Current Available Quota",
-      "button": "Get Code Now"
-    },
-    "redeem_code": {
-      "title": "Redeem Code",
-      "placeholder": "Please enter redemption code",
-      "paste": "Paste",
-      "paste_error": "Cannot access clipboard, please paste manually",
-      "submit": "Redeem Now",
-      "submitting": "Redeeming...",
-      "empty_code": "Please enter the redemption code!",
-      "success": "Top up successful!",
-      "request_failed": "Request failed",
-      "no_link": "Admin has not set up the top-up link!"
-    }
-  },
   "channel": {
     "title": "Channel Management",
     "search": "Search channels by ID, name and key...",
-    "balance_notice": "OpenAI channels no longer support getting balance via key, so balance shows as 0. For supported channel types, click balance to refresh.",
     "test_notice": "Channel testing only supports chat models, preferring gpt-3.5-turbo. If unavailable, uses the first model in your configured list.",
     "detail_notice": "Click the detail button below to show balance and set additional test models.",
     "table": {
@@ -48,7 +25,6 @@
       "type": "Type",
       "status": "Status",
       "response_time": "Response Time",
-      "balance": "Balance",
       "priority": "Priority",
       "test_model": "Test Model",
       "actions": "Actions",
@@ -61,9 +37,7 @@
       "status_unknown": "Unknown Status",
       "not_tested": "Not Tested",
       "priority_tip": "Channel selection priority, higher is preferred",
-      "select_test_model": "Please select test model",
-      "click_to_update": "Click to update",
-      "balance_not_supported": "-"
+      "select_test_model": "Please select test model"
     },
     "buttons": {
       "test": "Test",
@@ -85,8 +59,6 @@
       "test_success": "Channel {{name}} test successful, model {{model}}, time {{time}}s, output: {{message}}",
       "test_all_started": "Channel testing started successfully, please refresh page to see results.",
       "delete_disabled_success": "Deleted all disabled channels, total: {{count}}",
-      "balance_update_success": "Channel {{name}} balance updated successfully!",
-      "all_balance_updated": "All enabled channel balances have been updated!",
       "operation_success": "Operation completed successfully!"
     },
     "edit": {
@@ -245,55 +217,6 @@
       "unit": "$"
     }
   },
-  "redemption": {
-    "title": "Redemption Management",
-    "search": "Search redemption codes by ID and name ...",
-    "table": {
-      "id": "ID",
-      "name": "Name",
-      "status": "Status",
-      "quota": "Quota",
-      "created_time": "Created Time",
-      "redeemed_time": "Redeemed Time",
-      "actions": "Actions",
-      "no_name": "None",
-      "not_redeemed": "Not Redeemed"
-    },
-    "buttons": {
-      "copy": "Copy",
-      "delete": "Delete",
-      "confirm_delete": "Confirm Delete",
-      "enable": "Enable",
-      "disable": "Disable",
-      "edit": "Edit",
-      "add": "Add New Code",
-      "refresh": "Refresh"
-    },
-    "status": {
-      "unused": "Unused",
-      "disabled": "Disabled",
-      "used": "Used",
-      "unknown": "Unknown"
-    },
-    "edit": {
-      "title_edit": "Update Redemption Code",
-      "title_create": "Create New Redemption Code",
-      "name": "Name",
-      "name_placeholder": "Please enter name",
-      "quota": "Quota",
-      "quota_placeholder": "Please enter quota per redemption code",
-      "count": "Generate Count",
-      "count_placeholder": "Please enter number of codes to generate",
-      "buttons": {
-        "submit": "Submit",
-        "cancel": "Cancel"
-      }
-    },
-    "messages": {
-      "update_success": "Redemption code updated successfully!",
-      "create_success": "Redemption code created successfully!"
-    }
-  },
   "log": {
     "title": "Operation Log",
     "search": "Search logs...",
@@ -350,16 +273,21 @@
       "group_addition": "Please edit group multipliers in system settings to add new group:",
       "quota": "Remaining Quota",
       "quota_placeholder": "Please enter new remaining quota",
-      "github_id": "Linked GitHub Account",
-      "github_id_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
-      "wechat_id": "Linked WeChat Account",
-      "wechat_id_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
       "email": "Linked Email Account",
       "email_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
       "buttons": {
         "submit": "Submit",
-        "cancel": "Cancel"
-      }
+        "cancel": "Cancel",
+        "grant": "Grant"
+      },
+      "grant_title": "Grant Quota",
+      "grant_notice": "Add quota for this user; the grant will be recorded in the logs.",
+      "grant_amount": "Amount",
+      "grant_amount_placeholder": "Enter the quota amount to grant",
+      "grant_remark": "Remark",
+      "grant_remark_placeholder": "Reason for the grant, optional",
+      "grant_invalid_amount": "Please enter an amount greater than 0",
+      "current_quota": "Current remaining quota:"
     },
     "add": {
       "title": "Create New User Account"
@@ -367,7 +295,8 @@
     "messages": {
       "update_success": "User information updated successfully!",
       "create_success": "User account created successfully!",
-      "operation_success": "Operation completed successfully!"
+      "operation_success": "Operation completed successfully!",
+      "grant_success": "Quota granted successfully!"
     },
     "search": "Search users...",
     "table": {
@@ -528,10 +457,6 @@
         "new_user_placeholder": "e.g.: 100",
         "pre_consume": "Pre-consumed Quota per Request",
         "pre_consume_placeholder": "Refund or charge difference after request",
-        "inviter_reward": "Reward Quota for Inviter",
-        "inviter_reward_placeholder": "e.g.: 2000",
-        "invitee_reward": "Reward Quota for Using Invite Code",
-        "invitee_reward_placeholder": "e.g.: 1000",
         "buttons": {
           "save": "Save Quota Settings"
         }
@@ -576,8 +501,6 @@
       },
       "general": {
         "title": "General Settings",
-        "topup_link": "Top-up Link",
-        "topup_link_placeholder": "e.g.: Card selling website purchase link",
         "chat_link": "Chat Page Link",
         "chat_link_placeholder": "e.g.: ChatGPT Next Web deployment address",
         "quota_per_unit": "Quota per Dollar",

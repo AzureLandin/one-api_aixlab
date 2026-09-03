@@ -155,16 +155,6 @@ func (channel *Channel) UpdateResponseTime(responseTime int64) {
 	}
 }
 
-func (channel *Channel) UpdateBalance(balance float64) {
-	err := DB.Model(channel).Select("balance_updated_time", "balance").Updates(Channel{
-		BalanceUpdatedTime: helper.GetTimestamp(),
-		Balance:            balance,
-	}).Error
-	if err != nil {
-		logger.SysError("failed to update balance: " + err.Error())
-	}
-}
-
 func (channel *Channel) Delete() error {
 	var err error
 	err = DB.Delete(channel).Error

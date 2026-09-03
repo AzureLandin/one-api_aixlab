@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Form, Card } from 'semantic-ui-react';
+import { Button, Divider, Form, Header, Card, Message } from 'semantic-ui-react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { API, showError, showSuccess } from '../../helpers';
 import { renderQuota, renderQuotaWithPrompt } from '../../helpers/render';
@@ -14,8 +14,6 @@ const EditUser = () => {
     username: '',
     display_name: '',
     password: '',
-    github_id: '',
-    wechat_id: '',
     email: '',
     quota: 0,
     group: 'default',
@@ -25,12 +23,12 @@ const EditUser = () => {
     username,
     display_name,
     password,
-    github_id,
-    wechat_id,
     email,
     quota,
     group,
   } = inputs;
+  const [grant, setGrant] = useState({ quota: 0, remark: '' });
+  const [granting, setGranting] = useState(false);
   const handleInputChange = (e, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
   };
@@ -92,6 +90,29 @@ const EditUser = () => {
     } else {
       showError(message);
     }
+  };
+
+  const grantQuota = async () => {
+    const amount = parseInt(grant.quota);
+    if (!amount || amount <= 0) {
+      showError(t('user.edit.grant_invalid_amount'));
+      return;
+    }
+    setGranting(true);
+    const res = await API.post(`/api/topup`, {
+      user_id: parseInt(userId),
+      quota: amount,
+      remark: grant.remark,
+    });
+    const { success, message } = res.data;
+    if (success) {
+      showSuccess(t('user.messages.grant_success'));
+      setGrant({ quota: 0, remark: '' });
+      await loadUser();
+    } else {
+      showError(message);
+    }
+    setGranting(false);
   };
 
   return (
@@ -167,26 +188,6 @@ const EditUser = () => {
             )}
             <Form.Field>
               <Form.Input
-                label={t('user.edit.github_id')}
-                name='github_id'
-                value={github_id}
-                autoComplete='new-password'
-                placeholder={t('user.edit.github_id_placeholder')}
-                readOnly
-              />
-            </Form.Field>
-            <Form.Field>
-              <Form.Input
-                label={t('user.edit.wechat_id')}
-                name='wechat_id'
-                value={wechat_id}
-                autoComplete='new-password'
-                placeholder={t('user.edit.wechat_id_placeholder')}
-                readOnly
-              />
-            </Form.Field>
-            <Form.Field>
-              <Form.Input
                 label={t('user.edit.email')}
                 name='email'
                 value={email}
@@ -204,6 +205,49 @@ const EditUser = () => {
           </Form>
         </Card.Content>
       </Card>
+      {userId && (
+        <Card fluid className='chart-card'>
+          <Card.Content>
+            <Header as='h3'>{t('user.edit.grant_title')}</Header>
+            <Message>{t('user.edit.grant_notice')}</Message>
+            <Form autoComplete='off'>
+              <Form.Group widths={3}>
+                <Form.Input
+                  label={t('user.edit.grant_amount')}
+                  name='grant_quota'
+                  type={'number'}
+                  min='0'
+                  placeholder={t('user.edit.grant_amount_placeholder')}
+                  onChange={(e, { value }) => {
+                    setGrant((grant) => ({ ...grant, quota: value }));
+                  }}
+                  value={grant.quota}
+                />
+                <Form.Input
+                  label={t('user.edit.grant_remark')}
+                  name='grant_remark'
+                  placeholder={t('user.edit.grant_remark_placeholder')}
+                  onChange={(e, { value }) => {
+                    setGrant((grant) => ({ ...grant, remark: value }));
+                  }}
+                  value={grant.remark}
+                />
+              </Form.Group>
+              <Button
+                positive
+                loading={granting}
+                onClick={grantQuota}
+              >
+                {t('user.edit.buttons.grant')}
+              </Button>
+            </Form>
+            <Divider />
+            <p style={{ color: '#666', fontSize: '0.9em' }}>
+              {t('user.edit.current_quota')} {renderQuota(quota)}
+            </p>
+          </Card.Content>
+        </Card>
+      )}
     </div>
   );
 };

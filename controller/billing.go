@@ -8,6 +8,25 @@ import (
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
+// https://github.com/songquanpeng/one-api/issues/79
+// 以下是 OpenAI 额度查询接口（/v1/dashboard/billing/*）的响应体，
+// 原先定义在已删除的上游余额爬取代码中，这里仅保留用户侧接口需要的部分。
+
+type OpenAISubscriptionResponse struct {
+	Object             string  `json:"object"`
+	HasPaymentMethod   bool    `json:"has_payment_method"`
+	SoftLimitUSD       float64 `json:"soft_limit_usd"`
+	HardLimitUSD       float64 `json:"hard_limit_usd"`
+	SystemHardLimitUSD float64 `json:"system_hard_limit_usd"`
+	AccessUntil        int64   `json:"access_until"`
+}
+
+type OpenAIUsageResponse struct {
+	Object string `json:"object"`
+	//DailyCosts []OpenAIUsageDailyCost `json:"daily_costs"`
+	TotalUsage float64 `json:"total_usage"` // unit: 0.01 dollar
+}
+
 func GetSubscription(c *gin.Context) {
 	var remainQuota int64
 	var usedQuota int64

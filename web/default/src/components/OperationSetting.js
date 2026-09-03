@@ -14,14 +14,11 @@ const OperationSetting = () => {
   let now = new Date();
   let [inputs, setInputs] = useState({
     QuotaForNewUser: 0,
-    QuotaForInviter: 0,
-    QuotaForInvitee: 0,
     QuotaRemindThreshold: 0,
     PreConsumedQuota: 0,
     ModelRatio: '',
     CompletionRatio: '',
     GroupRatio: '',
-    TopUpLink: '',
     ChatLink: '',
     QuotaPerUnit: 0,
     AutomaticDisableChannelEnabled: '',
@@ -142,20 +139,11 @@ const OperationSetting = () => {
         if (originInputs['QuotaForNewUser'] !== inputs.QuotaForNewUser) {
           await updateOption('QuotaForNewUser', inputs.QuotaForNewUser);
         }
-        if (originInputs['QuotaForInvitee'] !== inputs.QuotaForInvitee) {
-          await updateOption('QuotaForInvitee', inputs.QuotaForInvitee);
-        }
-        if (originInputs['QuotaForInviter'] !== inputs.QuotaForInviter) {
-          await updateOption('QuotaForInviter', inputs.QuotaForInviter);
-        }
         if (originInputs['PreConsumedQuota'] !== inputs.PreConsumedQuota) {
           await updateOption('PreConsumedQuota', inputs.PreConsumedQuota);
         }
         break;
       case 'general':
-        if (originInputs['TopUpLink'] !== inputs.TopUpLink) {
-          await updateOption('TopUpLink', inputs.TopUpLink);
-        }
         if (originInputs['ChatLink'] !== inputs.ChatLink) {
           await updateOption('ChatLink', inputs.ChatLink);
         }
@@ -207,30 +195,6 @@ const OperationSetting = () => {
               type='number'
               min='0'
               placeholder={t('setting.operation.quota.pre_consume_placeholder')}
-            />
-            <Form.Input
-              label={t('setting.operation.quota.inviter_reward')}
-              name='QuotaForInviter'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.QuotaForInviter}
-              type='number'
-              min='0'
-              placeholder={t(
-                'setting.operation.quota.inviter_reward_placeholder'
-              )}
-            />
-            <Form.Input
-              label={t('setting.operation.quota.invitee_reward')}
-              name='QuotaForInvitee'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.QuotaForInvitee}
-              type='number'
-              min='0'
-              placeholder={t(
-                'setting.operation.quota.invitee_reward_placeholder'
-              )}
             />
           </Form.Group>
           <Form.Button
@@ -363,18 +327,7 @@ const OperationSetting = () => {
 
           <Divider />
           <Header as='h3'>{t('setting.operation.general.title')}</Header>
-          <Form.Group widths={4}>
-            <Form.Input
-              label={t('setting.operation.general.topup_link')}
-              name='TopUpLink'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.TopUpLink}
-              type='link'
-              placeholder={t(
-                'setting.operation.general.topup_link_placeholder'
-              )}
-            />
+          <Form.Group widths={3}>
             <Form.Input
               label={t('setting.operation.general.chat_link')}
               name='ChatLink'
