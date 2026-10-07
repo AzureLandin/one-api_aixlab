@@ -9,6 +9,7 @@ import (
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
+	"github.com/songquanpeng/one-api/model/migration"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -131,7 +132,29 @@ func InitDB() {
 		logger.FatalLog("failed to migrate database: " + err.Error())
 		return
 	}
+	// Explicit versioned migrations run after AutoMigrate; AutoMigrate only
+	// maintains legacy tables, new facts tables are owned by model/migration.
+	if err = reportMigrationCheck(DB, "main"); err != nil {
+		logger.FatalLog("database migration pre-check failed: " + err.Error())
+	}
+	if err = migration.Migrate(DB, "main"); err != nil {
+		logger.FatalLog("failed to run versioned migrations: " + err.Error())
+		return
+	}
 	logger.SysLog("database migrated")
+}
+
+// reportMigrationCheck runs the dry-run pre-flight and logs the report;
+// missing legacy tables mean this is a fresh database, which is fine.
+func reportMigrationCheck(db *gorm.DB, dbName string) error {
+	report, err := migration.Check(db, []string{"users", "tokens", "channels", "abilities", "options", "logs"})
+	if err != nil {
+		return err
+	}
+	logger.SysLog(fmt.Sprintf("[migration] preflight db=%s dialect=%s current=%d target=%d pending=%v missing_legacy_tables=%v warnings=%v",
+		dbName, report.Dialect, report.CurrentVersion, report.TargetVersion,
+		report.Pending, report.MissingTables, report.Warnings))
+	return nil
 }
 
 func migrateDB() error {
@@ -186,6 +209,9 @@ func InitLogDB() {
 		logger.FatalLog("failed to migrate secondary database: " + err.Error())
 		return
 	}
+	// The versioned migration registry is currently main-database-only
+	// (usage_records lives in the main DB). When log-database schema versions
+	// are introduced, run their own registry here — never the main one.
 	logger.SysLog("secondary database migrated")
 }
 

@@ -85,7 +85,25 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 1：Usage 事实层
 
-（待实施）
+完成内容（2026-10-08，提交见 git log `feat(usage):`）：
+
+1. **版本化迁移包 `model/migration/`**
+   - `runner.go`：`schema_migrations` 记账表；`Migrate()` 按版本顺序执行、已应用版本跳过、每步可安全重试；`Check()` 提供 dry-run 预检（方言、当前/目标版本、pending 列表、旧表缺失、未注册版本告警）。
+   - `v001_add_usage_records.go`：三种方言各自 DDL 创建 `usage_records`（`request_id` UNIQUE、缓存列可空），并在 `options` 写入 `usage_cutover_at`（幂等）。
+   - `v002_add_usage_indexes.go`：`(user/token/model/channel, created_at)` 复合索引 + `created_at` 索引，`HasIndex` 判断实现幂等。
+   - 接入点：`model/main.go` `InitDB` 在 `migrateDB()`（AutoMigrate 兜底）之后执行预检 + `migration.Migrate(DB, "main")`。`usage_records` 属主库；日志库暂不挂主库迁移集合（代码注释已说明扩展方式）。
+2. **统一 Usage 结构 `relay/model/misc.go`**：指针语义区分未报告/零值；`NormalizeUsage` 派生 `reported/not_reported/invalid`，不合法值保留原样只打标记；total 不一致 → `Abnormal`，不改写原值。JSON 解析自动捕获 `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`。
+3. **UsageRecorder `relay/usage/recorder.go`**：`Record/RecordOnce`；`request_id` 幂等（存在检查 + 唯一索引双保险）；未标注来源保守记 `estimated`；`error` 状态行 `request_count=0`；不触碰额度。
+4. **全路径接入**：`relay/controller/text.go`（成功 + 上游错误 + 响应错误）、`image.go`（成功/非 2xx/解析错误）、`audio.go`（成功 + 非 200；转写输出 token 为本地估算）。与旧额度逻辑并行运行，旧结算路径本阶段未删除。
+5. **OpenAI 适配器来源标注**：流式捕获 usage → `reported`；非流式上游缺 usage 时的本地补齐 → `estimated`，有值 → `reported`。
+6. **聚合 API `controller/usage.go` + `model/usage.go`**：
+   - `GET /api/usage/summary|trend|by-user|by-model|by-channel`（AdminAuth，支持 user_id/token_id/channel_id/model_name/时间过滤、limit）
+   - `GET /api/usage/self/summary|trend`（UserAuth，强制本人范围）
+   - 所有查询默认 `AfterCutover=true` 且排除 legacy；三率（命中率/调用命中率/覆盖率）由聚合分子分母计算，分母为 0 → `null`。
+7. **测试**：`relay/model/misc_test.go`（6 例：not_reported、reported 零值、invalid 不裁剪、Anthropic 双缓存字段、abnormal 保留原值、details 回退映射）；`model/usage_test.go`（6 例：迁移幂等、request_id 幂等、聚合三率与 legacy 排除、cutover 过滤、error 行不计数）；`relay/usage/recorder_test.go`（3 例：来源保守标注、error 归零、幂等与 fallback id）。
+8. **验证**：`go build ./...` 通过；`go test ./...` 除阶段 0 记录的存量 `common/image` 外全部通过。
+
+并行运行观察点（阶段 2 前置）：新表与旧 `logs` 并存；上线灰度后对比 `usage_records` 行数与成功请求数、Token 总量与旧日志 `prompt_tokens+completion_tokens` 差异，确认后再进入阶段 2 删除结算调用。
 
 ## 阶段 2：移除额度与倍率
 

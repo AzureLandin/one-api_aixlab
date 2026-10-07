@@ -84,6 +84,11 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 		logger.SysError("error reading stream: " + err.Error())
 	}
 
+	if usage != nil {
+		// usage captured from the stream tail was reported by the upstream
+		usage.Source = model.UsageSourceReported
+	}
+
 	if !doneRendered {
 		render.Done(c)
 	}
@@ -145,7 +150,10 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      promptTokens + completionTokens,
+			Source:           model.UsageSourceEstimated,
 		}
+	} else {
+		textResponse.Usage.Source = model.UsageSourceReported
 	}
 	return nil, &textResponse.Usage
 }

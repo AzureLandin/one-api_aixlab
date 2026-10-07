@@ -29,6 +29,25 @@ func SetApiRouter(router *gin.Engine) {
 			plazaRoute.GET("/models", controller.GetPlazaModels)
 		}
 
+		usageRoute := apiRouter.Group("/usage")
+		{
+			adminUsage := usageRoute.Group("/")
+			adminUsage.Use(middleware.AdminAuth())
+			{
+				adminUsage.GET("/summary", controller.GetUsageSummary)
+				adminUsage.GET("/trend", controller.GetUsageTrend)
+				adminUsage.GET("/by-user", controller.GetUsageByUser)
+				adminUsage.GET("/by-model", controller.GetUsageByModel)
+				adminUsage.GET("/by-channel", controller.GetUsageByChannel)
+			}
+			selfUsage := usageRoute.Group("/self")
+			selfUsage.Use(middleware.UserAuth())
+			{
+				selfUsage.GET("/summary", controller.GetSelfUsageSummary)
+				selfUsage.GET("/trend", controller.GetSelfUsageTrend)
+			}
+		}
+
 		userRoute := apiRouter.Group("/user")
 		{
 			userRoute.POST("/register", middleware.CriticalRateLimit(), controller.Register)

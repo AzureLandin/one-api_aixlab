@@ -13,6 +13,7 @@ import (
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay"
@@ -21,6 +22,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	usagelog "github.com/songquanpeng/one-api/relay/usage"
 )
 
 func getImageRequest(c *gin.Context, _ int) (*relaymodel.ImageRequest, error) {
@@ -197,8 +199,27 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		if resp != nil &&
 			resp.StatusCode != http.StatusCreated && // replicate returns 201
 			resp.StatusCode != http.StatusOK {
+			usagelog.Default().RecordOnce(ctx, usagelog.RecordInput{
+				RequestID: helper.GetRequestID(ctx),
+				UserID:    meta.UserId,
+				TokenID:   meta.TokenId,
+				ChannelID: meta.ChannelId,
+				ModelName: imageRequest.Model,
+				Status:    model.UsageStatusError,
+			})
 			return
 		}
+
+		// usage fact for image generations: token counts are not reported by
+		// image upstreams, so record an honest empty estimated usage.
+		usagelog.Default().RecordOnce(ctx, usagelog.RecordInput{
+			RequestID: helper.GetRequestID(ctx),
+			UserID:    meta.UserId,
+			TokenID:   meta.TokenId,
+			ChannelID: meta.ChannelId,
+			ModelName: imageRequest.Model,
+			Status:    model.UsageStatusSuccess,
+		})
 
 		err := model.PostConsumeTokenQuota(meta.TokenId, quota)
 		if err != nil {
@@ -231,6 +252,14 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	_, respErr := adaptor.DoResponse(c, resp, meta)
 	if respErr != nil {
 		logger.Errorf(ctx, "respErr is not nil: %+v", respErr)
+		usagelog.Default().RecordOnce(ctx, usagelog.RecordInput{
+			RequestID: helper.GetRequestID(ctx),
+			UserID:    meta.UserId,
+			TokenID:   meta.TokenId,
+			ChannelID: meta.ChannelId,
+			ModelName: imageRequest.Model,
+			Status:    model.UsageStatusError,
+		})
 		return respErr
 	}
 

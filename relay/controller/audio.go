@@ -16,6 +16,7 @@ import (
 	"github.com/songquanpeng/one-api/common/client"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
@@ -25,6 +26,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
+	usagelog "github.com/songquanpeng/one-api/relay/usage"
 )
 
 func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatusCode {
@@ -211,11 +213,13 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 	}
 	if resp.StatusCode != http.StatusOK {
+		recordAudioUsageError(ctx, audioModel, userId, tokenId, channelId)
 		return RelayErrorHandler(resp)
 	}
 	succeed = true
 	quotaDelta := quota - preConsumedQuota
 	defer func(ctx context.Context) {
+		go recordAudioUsage(ctx, relayMode, audioModel, userId, tokenId, channelId, quota)
 		go billing.PostConsumeQuota(ctx, tokenId, quotaDelta, quota, userId, channelId, modelRatio, groupRatio, audioModel, tokenName)
 	}(c.Request.Context())
 
@@ -278,4 +282,41 @@ func getTextFromJSON(body []byte) (string, error) {
 		return "", fmt.Errorf("unmarshal_response_body_failed err :%w", err)
 	}
 	return whisperResponse.Text, nil
+}
+
+// recordAudioUsage persists the audio generation fact.
+// Transcription/translation output text was token-counted locally while
+// computing quota; that number is an estimate, so usage_source stays empty
+// (the recorder defaults it to "estimated"). TTS has no reliable token
+// counts at all and records zeros.
+func recordAudioUsage(ctx context.Context, relayMode int, modelName string, userId, tokenId, channelId int, textTokens int64) {
+	input := usagelog.RecordInput{
+		RequestID: helper.GetRequestID(ctx),
+		UserID:    userId,
+		TokenID:   tokenId,
+		ChannelID: channelId,
+		ModelName: modelName,
+		Status:    model.UsageStatusSuccess,
+	}
+	if relayMode != relaymode.AudioSpeech && textTokens > 0 {
+		input.Usage.CompletionTokens = int(textTokens)
+		input.Usage.TotalTokens = int(textTokens)
+	}
+	if err := usagelog.Default().RecordOnce(ctx, input); err != nil {
+		logger.Errorf(ctx, "audio usage record failed: %s", err.Error())
+	}
+}
+
+func recordAudioUsageError(ctx context.Context, modelName string, userId, tokenId, channelId int) {
+	input := usagelog.RecordInput{
+		RequestID: helper.GetRequestID(ctx),
+		UserID:    userId,
+		TokenID:   tokenId,
+		ChannelID: channelId,
+		ModelName: modelName,
+		Status:    model.UsageStatusError,
+	}
+	if err := usagelog.Default().RecordOnce(ctx, input); err != nil {
+		logger.Errorf(ctx, "audio usage error record failed: %s", err.Error())
+	}
 }

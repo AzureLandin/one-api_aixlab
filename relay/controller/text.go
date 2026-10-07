@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor"
@@ -20,6 +22,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
+	usagelog "github.com/songquanpeng/one-api/relay/usage"
 )
 
 func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
@@ -68,10 +71,12 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
 		logger.Errorf(ctx, "DoRequest failed: %s", err.Error())
+		recordUsage(ctx, meta, textRequest, nil, model.UsageStatusError)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
 		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		recordUsage(ctx, meta, textRequest, nil, model.UsageStatusError)
 		return RelayErrorHandler(resp)
 	}
 
@@ -80,11 +85,34 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	if respErr != nil {
 		logger.Errorf(ctx, "respErr is not nil: %+v", respErr)
 		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		recordUsage(ctx, meta, textRequest, usage, model.UsageStatusError)
 		return respErr
 	}
 	// post-consume quota
 	go postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, modelRatio, groupRatio, systemPromptReset)
+	go recordUsage(ctx, meta, textRequest, usage, model.UsageStatusSuccess)
 	return nil
+}
+
+// recordUsage persists the usage fact alongside the legacy quota path during
+// the parallel-run phase (implementation doc §5.1 step 1-2). Recording failure
+// must never overwrite the upstream response error.
+func recordUsage(ctx context.Context, meta *meta.Meta, textRequest *model.GeneralOpenAIRequest, u *model.Usage, status string) {
+	input := usagelog.RecordInput{
+		RequestID: helper.GetRequestID(ctx),
+		UserID:    meta.UserId,
+		TokenID:   meta.TokenId,
+		ChannelID: meta.ChannelId,
+		ModelName: textRequest.Model,
+		Stream:    meta.IsStream,
+		Status:    status,
+	}
+	if u != nil {
+		input.Usage = *u
+	}
+	if err := usagelog.Default().RecordOnce(ctx, input); err != nil {
+		logger.Errorf(ctx, "usage record failed: %s", err.Error())
+	}
 }
 
 func getRequestBody(c *gin.Context, meta *meta.Meta, textRequest *model.GeneralOpenAIRequest, adaptor adaptor.Adaptor) (io.Reader, error) {
