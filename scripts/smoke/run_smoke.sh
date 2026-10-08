@@ -8,7 +8,8 @@ cd "$HERE"
 # 一次性产物放本目录（/tmp 每次 bash 调用是独立命名空间，不能跨调用复用）
 rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_login.json tmp_user.json tmp_l2.json tmp_tk.json tmp_ch.json tmp_relay.json tmp_topup.json \
-      tmp_resp.json tmp_resp2.json tmp_resp3.json tmp_resp4.json tmp_msg.json tmp_msg2.json
+      tmp_resp.json tmp_resp2.json tmp_resp3.json tmp_resp4.json tmp_msg.json tmp_msg2.json \
+      tmp_cache.json tmp_sum.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -173,18 +174,40 @@ CODE=$(curl -s -o tmp_msg2.json -w '%{http_code}' -X POST http://127.0.0.1:13000
   -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"hi"}]}')
 check "messages require max_tokens 400" 400 "$CODE"
 
+# 16b. §8.1 缓存字段贯通：带 usecache 的请求让 mock 上报 cached_tokens
+CODE=$(curl -s -o tmp_cache.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"usecache please"}]}')
+check "cache relay 200" 200 "$CODE"
+sleep 1
+CR=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
+check "cached_tokens→reported cache_read=3" "reported|3|reported" "$CR"
+
 # 17. 三种协议入口的成功生成都应落 usage_records
-#     chat(1) + responses 非流式(1) + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 5
+#     chat(2: 基础 + usecache) + responses 非流式(1) + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 6
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 5 ] && { echo "PASS: usage_records 5 success rows (chat+responses±stream+messages±stream)"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 6 ] && { echo "PASS: usage_records 6 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
-# 18. 流式行应以 reported 收尾（mock 发了 usage 尾块），绝不为零命中伪造
+# 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 5 ] && { echo "PASS: all 5 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
-# 19. 无缓存上报的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
+[ "$REP" = 6 ] && { echo "PASS: all 6 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+# 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 5 ] && { echo "PASS: not_reported cache status where upstream silent"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+[ "$NR" = 5 ] && { echo "PASS: 5 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+# 20. §8.1 上报缓存的行恰好 1 条且计入 cache_read，写入为 0（未上报→NULL）
+RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
+[ "$RCC" = 1 ] && { echo "PASS: exactly 1 reported-cache row"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate 仅统计 reported 记录 = 3/7；coverage = 1/6
+curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
+python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_sum.json'))['data']
+ok=(abs(d['cache_hit_rate']-3/7)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-1/6)<1e-9 and d['cache_read_input_tokens']==3
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==5)
+sys.exit(0 if ok else 1)
+PY
 
 echo
 echo "RESULT pass=$pass fail=$fail"

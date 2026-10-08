@@ -213,7 +213,26 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 5：缓存归一化
 
-（待实施）
+### 完成时间
+2026-10-08（提交于阶段 5 commit）
+
+### 实施内容
+1. **§8.1 字段映射**：
+   - Chat Completions `usage.prompt_tokens_details.cached_tokens` / Responses `usage.input_tokens_details.cached_tokens` → `cache_read_input_tokens`：由 `relay/model.NormalizeUsage` 统一处理（读 `PromptTokensDetails`，缺失再回退 `InputTokensDetails`）。OpenAI 适配器非流式/流式均以值拷贝透传 details，`recordUsage` 前 `NormalizeUsage` 落库。
+   - Anthropic `usage.cache_read_input_tokens` → `cache_read_input_tokens`、`usage.cache_creation_input_tokens` → `cache_write_input_tokens`：扩展 `relay/adaptor/anthropic/model.go` 的 `Usage`（指针字段，nil=未上报）；`Handler` 非流式映射 + `Source=reported`；`StreamHandler` 在 `message_start`(输入侧缓存)/`message_delta` 上“取最新非 nil”而非累加，避免缓存读被重复计数。新增 `i64Ptr` 保持 nil 语义。
+   - 缓存写入仅 OpenAI 兼容上游“若存在”才映射（本实现下写侧通常为 nil→未上报，符合 §8.1“若存在”）。
+2. **§8.2 状态规则**：合法缓存字段→`reported`；明确缺失→`not_reported`；值非法(负数/读+写>输入)→`invalid`；全部由 `NormalizeUsage` 判定，绝不按模型名/渠道名/是否重复猜测命中。上报的 0 缓存（ptr-to-0）仍是 `reported`，与“未上报”区分。
+3. **§8.3 计算规则**：三指标沿用阶段 1 的聚合 SQL + `(*UsageAggRow).Summary()`——`cache_hit_rate=Σcache_read/Σinput`（分子分母仅含 `cache_usage_status=reported` 行）、`call_hit_rate=hit_calls/reported_cache_calls`、`cache_coverage=reported_cache_calls/generated_calls(success)`；分母为 0 → null（前端显示“—”，非 0%）。缓存写入只入展示、不进命中分子。异常(total≠prompt+completion)由 `normalizeTotalCheck` 置 `Abnormal` 并**保留原始值**（不钳制到 100%），recorder 记 warn。
+4. **贯通 adaptor**：补齐此前阶段 3/4 未打 `Source` 的 Anthropic `Handler`/`StreamHandler`；OpenAI 侧阶段 2/4 已置 reported/estimated，本阶段仅核对 details 透传无丢失。
+
+### 测试与验收
+- 新增 `relay/adaptor/anthropic/usage_test.go`：缓存字段映射(read/write)+`Source=reported`；缓存缺失→两指针 nil→`NormalizeUsage` 判 `not_reported`（非伪造 0）；上报 0 缓存→ptr-to-0 且 `reported`。
+- 复用阶段 1 单测：`relay/model/misc_test.go`（not_reported / reported-zero / invalid-不钳制 / 双字段 / abnormal 保留原值 / input_details 回退）、`model/usage_test.go`（`TestUsageAggregationRates`：仅 reported 行进分子分母、命中率 40/150、call 0.5、coverage 2/4、无 reported 缓存→null）。
+- 冒烟（`scripts/smoke/mock_upstream.py` 现按 `prompt` 含 `usecache` 时经 `prompt_tokens_details.cached_tokens=3` 上报；并新增 chunked body 解码——Go 客户端在无已知长度时用 chunked，旧 mock 只读 Content-Length 会丢 body 且串扰连接）：`cached_tokens→cache_read_input_tokens=3`、恰 1 条 `reported` 缓存行、5 条 `not_reported`、`/api/usage/summary` 三指标 `cache_hit_rate=3/7`、`call_hit_rate=1`、`cache_coverage=1/6`、`cache_write=0`。`RESULT pass=42 fail=0`。
+- `go build ./...`、`gofmt -l`、`go vet`、`go test`（排除存量红 `common/image`）全部通过。
+
+### 遗留（阶段 6）
+- `invalid`/`Abnormal` 前端“数据异常”展示（API 已回 `invalid_cache_calls` 计数与原始值），与旧额度/倍率展示移除一并在阶段 6 前端处理。
 
 ## 阶段 6：前端现代化
 

@@ -288,6 +288,17 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		if meta != nil {
 			usage.PromptTokens += meta.Usage.InputTokens
 			usage.CompletionTokens += meta.Usage.OutputTokens
+			// Values came from upstream usage events, so this stream is reported.
+			usage.Source = model.UsageSourceReported
+			// Cache fields are reported on message_start (input side) and echoed on
+			// the terminal delta; adopt the latest non-nil value rather than summing,
+			// so a cache read is never double counted (§8.1/§8.2).
+			if v := i64Ptr(meta.Usage.CacheReadInputTokens); v != nil {
+				usage.CacheReadInputTokens = v
+			}
+			if v := i64Ptr(meta.Usage.CacheCreationInputTokens); v != nil {
+				usage.CacheWriteInputTokens = v
+			}
 			if len(meta.Id) > 0 { // only message_start has an id, otherwise it's a finish_reason event.
 				modelName = meta.Model
 				id = fmt.Sprintf("chatcmpl-%s", meta.Id)
@@ -366,6 +377,12 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		PromptTokens:     claudeResponse.Usage.InputTokens,
 		CompletionTokens: claudeResponse.Usage.OutputTokens,
 		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
+		// §8.1: Anthropic cache_read -> normalized cache_read, cache_creation ->
+		// normalized cache_write. nil (absent) stays nil, never a fabricated 0.
+		CacheReadInputTokens:  i64Ptr(claudeResponse.Usage.CacheReadInputTokens),
+		CacheWriteInputTokens: i64Ptr(claudeResponse.Usage.CacheCreationInputTokens),
+		// These numbers came from the upstream body, so they are reported.
+		Source: model.UsageSourceReported,
 	}
 	fullTextResponse.Usage = usage
 	jsonResponse, err := json.Marshal(fullTextResponse)
@@ -376,4 +393,15 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, err = c.Writer.Write(jsonResponse)
 	return nil, &usage
+}
+
+// i64Ptr converts an Anthropic *int usage field to the normalized *int64 cache
+// field, preserving nil so "not reported" is never coerced to a zero cache hit
+// (§8.1/§8.2).
+func i64Ptr(v *int) *int64 {
+	if v == nil {
+		return nil
+	}
+	out := int64(*v)
+	return &out
 }

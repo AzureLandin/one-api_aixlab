@@ -59,6 +59,10 @@ type Request struct {
 type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+	// Prompt-caching fields (§8.1). Pointers so "absent" (nil) is distinguishable
+	// from "reported zero"; absence must never be turned into a fabricated 0 hit.
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 type Error struct {

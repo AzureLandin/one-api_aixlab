@@ -36,9 +36,33 @@ def stream_chunks():
 
 
 class MockHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
+    def _read_body(self):
+        """Read the request body whether framed by Content-Length or chunked.
+        Go's http client uses chunked transfer-encoding when the outgoing body
+        reader has no known length; BaseHTTPRequestHandler does not auto-decode
+        it, so we must, else we'd drop the payload and desync the connection."""
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            parts = []
+            while True:
+                line = self.rfile.readline().strip()
+                if not line:
+                    continue
+                try:
+                    n = int(line.split(b";")[0], 16)
+                except ValueError:
+                    break
+                if n == 0:
+                    self.rfile.readline()  # trailing CRLF
+                    break
+                parts.append(self.rfile.read(n))
+                self.rfile.readline()  # CRLF after chunk
+            return b"".join(parts)
         length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b"{}"
+        return self.rfile.read(length) if length else b""
+
+    def do_POST(self):
+        raw = self._read_body()
         wants_stream = False
         try:
             wants_stream = bool(json.loads(raw).get("stream"))
@@ -55,6 +79,11 @@ class MockHandler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 return
+            usage = {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+            # §8.1 end-to-end: when the prompt carries the marker, report cached
+            # tokens via the OpenAI detail field (maps to cache_read_input_tokens).
+            if b"usecache" in raw:
+                usage["prompt_tokens_details"] = {"cached_tokens": 3}
             body = json.dumps({
                 "id": "chatcmpl-mock",
                 "object": "chat.completion",
@@ -65,7 +94,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     "message": {"role": "assistant", "content": "ok"},
                     "finish_reason": "stop",
                 }],
-                "usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+                "usage": usage,
             }).encode()
         else:
             body = b'{"error":"not found"}'
