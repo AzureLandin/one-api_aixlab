@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -91,8 +92,11 @@ func RootAuth() func(c *gin.Context) {
 func TokenAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		key := c.Request.Header.Get("Authorization")
-		key = strings.TrimPrefix(key, "Bearer ")
+		key, err := extractTokenKey(c)
+		if err != nil {
+			abortWithMessage(c, http.StatusUnauthorized, err.Error())
+			return
+		}
 		key = strings.TrimPrefix(key, "sk-")
 		parts := strings.Split(key, "-")
 		key = parts[0]
@@ -150,11 +154,52 @@ func TokenAuth() func(c *gin.Context) {
 	}
 }
 
+// extractTokenKey resolves the client token from request headers following the
+// project auth order (implementation doc §6.5):
+//  1. prefer `x-api-key` (Anthropic-style clients);
+//  2. fall back to `Authorization: Bearer ...` (OpenAI-style clients);
+//  3. if BOTH are present and resolve to different tokens, reject rather than
+//     silently picking one.
+//
+// Returns the raw credential (Bearer prefix removed if applicable).
+func extractTokenKey(c *gin.Context) (string, error) {
+	xAPIKey := c.Request.Header.Get("x-api-key")
+	authorization := c.Request.Header.Get("Authorization")
+	bearer := strings.TrimPrefix(authorization, "Bearer ")
+
+	if xAPIKey != "" && bearer != "" {
+		if normalizeTokenRef(xAPIKey) != normalizeTokenRef(bearer) {
+			return "", errors.New("同时提供了 x-api-key 与 Authorization，且指向不同令牌；二者必须一致")
+		}
+	}
+	if xAPIKey != "" {
+		return xAPIKey, nil
+	}
+	return bearer, nil
+}
+
+// normalizeTokenRef strips the "sk-" prefix and any trailing channel selector
+// so that equivalent credentials compare equal.
+func normalizeTokenRef(key string) string {
+	key = strings.TrimSpace(key)
+	key = strings.TrimPrefix(key, "sk-")
+	if idx := strings.Index(key, "-"); idx >= 0 {
+		key = key[:idx]
+	}
+	return key
+}
+
 func shouldCheckModel(c *gin.Context) bool {
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/completions") {
 		return true
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/chat/completions") {
+		return true
+	}
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/responses") {
+		return true
+	}
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/messages") {
 		return true
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/images") {

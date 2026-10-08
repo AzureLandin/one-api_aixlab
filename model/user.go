@@ -102,8 +102,9 @@ func DeleteUserById(id int) (err error) {
 	return user.Delete()
 }
 
-// Insert 创建一个新用户并赠送初始额度，同时为其创建一个默认令牌。
-// 本系统面向课题组内网，已移除邀请码返利逻辑。
+// Insert 创建一个新用户并为其创建一个默认令牌。
+// 阶段2 起不再赠送初始额度：额度不再是请求放行依据，新用户以 0 额度起步，
+// 通过默认无限令牌访问模型。本系统面向课题组内网，已移除邀请码返利逻辑。
 func (user *User) Insert(ctx context.Context) error {
 	var err error
 	if user.Password != "" {
@@ -112,14 +113,12 @@ func (user *User) Insert(ctx context.Context) error {
 			return err
 		}
 	}
-	user.Quota = config.QuotaForNewUser
+	// 阶段2：注册不再赠送额度，quota 列仅作历史字段保留（LEGACY）。
+	user.Quota = 0
 	user.AccessToken = random.GetUUID()
 	result := DB.Create(user)
 	if result.Error != nil {
 		return result.Error
-	}
-	if config.QuotaForNewUser > 0 {
-		RecordLog(ctx, user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", common.LogQuota(config.QuotaForNewUser)))
 	}
 	// create default token
 	cleanToken := Token{
@@ -129,7 +128,7 @@ func (user *User) Insert(ctx context.Context) error {
 		CreatedTime:    helper.GetTimestamp(),
 		AccessedTime:   helper.GetTimestamp(),
 		ExpiredTime:    -1,
-		RemainQuota:    -1,
+		RemainQuota:    0,
 		UnlimitedQuota: true,
 	}
 	result.Error = cleanToken.Insert()

@@ -135,7 +135,54 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 3：多 API 格式路由
 
-（待实施）
+### 完成时间
+2026-10-08（提交于阶段 3 commit）
+
+### 实施内容
+1. **入向鉴权扩展** `middleware/auth.go` `TokenAuth`：新增 `extractTokenKey`，按 §6.5 顺序解析客户端令牌——
+   - 优先 `x-api-key`；无则回退 `Authorization: Bearer ...`；
+   - 两者同时存在时，用 `normalizeTokenRef`（去 `sk-` 前缀、截到首个 `-`）归一后比较，**指向不同令牌则确定性 401 拒绝**，不随机选择；等价写法（仅 Bearer 前缀/渠道后缀不同）不算冲突。
+   - 出站上游密钥不受影响：`Distribute` 仍用所选渠道 key 覆盖 `Authorization`，`meta.APIKey` 取的是渠道 key，客户端 `x-api-key` 仅在 `TokenAuth` 消费。
+2. **新增两个客户端协议入口** `router/relay.go`：`POST /v1/responses`、`POST /v1/messages`，复用既有中间件链（`RelayPanicRecover → TokenAuth → Distribute`）。`relaymode` 新增 `Responses`、`AnthropicMessages` 两个模式常量与 `GetByPath` 前缀映射；`controller/relay.go` `relayHelper` 增加分发分支。
+3. **统一中间结构 + 分层** `relay/protocol/`（纯转换、无 gin、可单测）：
+   - `errors.go`：`ProtocolError` 携带参数名/类型/码/状态，落地 §6.4/§6.5 “不支持项必须点名拒绝，不静默降级”。
+   - `responses.go`：`ParseResponses`（OpenAI Responses → `GeneralOpenAIRequest`）+ `RenderResponses`（`openai.TextResponse` → Responses 信封）。
+   - `messages.go`：`ParseMessages`（Anthropic Messages → `GeneralOpenAIRequest`）+ `RenderMessages`（`openai.TextResponse` → Anthropic 信封），含 `finish_reason ↔ stop_reason` 反向映射（现有 anthropic 适配器只有“Claude 上游→OpenAI 客户端”方向）。
+   - `util.go`：`json.RawMessage` 防御式读取小工具。
+4. **共享 relay 内核** `relay/controller/protocol.go`：`relayProtocolHelper` 走 §6.1 管线——解析→模型映射/强制 system prompt/prompt 估算（与 chat 路径一致）→**上游协议能力检查**→用 OpenAI 兼容上游发起 `/v1/chat/completions`→读取并归一 `openai.TextResponse`+usage（reported/estimated 判定同 `openai.Handler`）→按客户端协议渲染→收尾 `recordConsumeLog`+`recordUsage`（复用阶段 1/2 的幂等 recorder，`request_id` 不变）。
+5. **薄入口** `relay/controller/protocol_responses.go`、`protocol_messages.go`：各自 `protocolEntry`（Parse/Stream/Render）+ `RelayResponsesHelper`/`RelayMessagesHelper`。
+
+### §6.4 Responses 第一版边界（均返回点名结构化错误）
+- `store`：默认按 false；`store=true` → 拒绝（不做服务端持久化）。
+- `previous_response_id` → 拒绝；`background=true` → 拒绝。
+- `input` 支持裸字符串、message 项（含 text/image content part）、`function_call`、`function_call_output`；`reasoning`/`item_reference`/`computer_call`/未识别项类型 → 点名 `input[i].type` 拒绝。
+- `tools` 仅 function（内置 web_search/file_search 等拒绝）；`tool_choice` 支持 auto/none/required 与 function 对象。
+- 稳定 `response.id`（`resp_` + 上游 chatcmpl 后缀）、`output[]`（message + function_call 项）、`output_text` 由 content 派生；`finish_reason=length` → `status:"incomplete"`+`incomplete_details`。
+- usage 指针语义：`input_tokens_details.cached_tokens`/`output_tokens_details.reasoning_tokens` **仅在上游上报时出现**，绝不伪造 0。
+
+### §6.5 Messages 覆盖
+- 请求：`system`（string 或 text block 数组）、`messages`（string 或 block 数组）、`max_tokens`（必填正整数）、`stop_sequences`、`temperature/top_p/top_k`、`tools`（input_schema）、`tool_choice`（auto/any→required/tool/none）。
+- content block：`text`、`image`（base64→data URI、url→image_url）、`assistant` 的 `tool_use`（归一为 OpenAI tool_calls，arguments 存 JSON 字符串）、`tool_result`（归一为独立 `role:"tool"` 消息，带 `tool_call_id`）。`document`/未知块 → 点名拒绝；`tool_use` 出现在 user 消息 → 拒绝。
+- 响应：`id/msg_*`、`type:"message"`、`role:"assistant"`、`content`（text + tool_use 块，input 由 arguments 反解析）、`stop_reason`（stop→end_turn、length→max_tokens、tool_calls→tool_use、空→null）、`usage`（input/output_tokens）。
+
+### §6.6 上游协议选择
+- 阶段 3 两个入口仅支持 **OpenAI 兼容上游**（`meta.APIType==apitype.OpenAI`）；其他渠道类型返回明确 `upstream_protocol_unsupported`，不猜测、不静默降级。多上游协议矩阵在阶段 4+ 扩展。
+- 客户端协议 ≠ 上游协议：入口只负责“客户端 JSON ↔ 统一中间结构 ↔ 规范 OpenAI 响应 ↔ 客户端渲染”，中间结构 `GeneralOpenAIRequest` 与既有分发/适配层解耦。
+
+### 明确限制（阶段 4 收口）
+- **流式（typed SSE）在阶段 4 实现**：`/v1/responses` 与 `/v1/messages` 收到 `stream=true` 时返回点名 400（`unsupported_parameter`，param=`stream`），非“拼成一条非标字符串”的降级。§6.4 “流式事件必须有明确事件类型” 由阶段 4 交付。
+- 预检/协议级拒绝（缺 model、非法块、store/previous_response_id/background、上游类型不符、stream 延后）**不写 error usage 行**——未真正发起生成，与 chat 路径的校验错误行为一致；只有真实 relay 尝试（do_request 失败、上游错误、读取失败）才记 error 行。
+
+### 阶段 2 遗留项修复
+- `model/user.go` `Insert`：注册**不再赠送** `config.QuotaForNewUser`，新用户 `Quota=0` 起步，默认令牌 `RemainQuota:0,UnlimitedQuota:true`（此前检查点标记的未落地编辑，已补齐）。
+
+### 测试与验收
+1. 协议矩阵单测 `relay/protocol/{responses,messages}_test.go`：
+   - Responses：裸串/instructions+content parts/tool_call+output 项映射；拒绝 previous_response_id/background/store=true/未知项/缺字段；渲染 id、completed/incomplete、function_call 项、usage 指针语义（无上报不造 details）。
+   - Messages：system/text block、string content、image base64→data URI、tool_use+tool_result 往返、tools/tool_choice(any→required)；拒绝缺 max_tokens/坏 role/未知块/tool_use 在 user；渲染 text/tool_use、stop_reason 映射、length→max_tokens、空 finish→nil。
+2. 鉴权单测 `middleware/auth_test.go`：x-api-key 优先、Bearer 回退、仅 x-api-key、**冲突确定性拒绝**、等价写法不算冲突、无头返回空。
+3. 端到端冒烟 `scripts/smoke/run_smoke.sh` 扩至 **30 项全过**：新增 `/v1/responses` 200+信封+usage、拒绝 previous_response_id/store=true/stream(400)；`/v1/messages` 经 `x-api-key` 200+信封+usage、冲突 401、缺 max_tokens 400；三入口成功生成各落 1 条 `usage_records success`。
+4. `go build ./...`、`gofmt`、`go vet`、`go test`（除存量红的 `common/image`）全部通过。
 
 ## 阶段 4：流式与 Usage 收尾
 

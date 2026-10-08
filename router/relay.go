@@ -23,6 +23,9 @@ func SetRelayRouter(router *gin.Engine) {
 		relayV1Router.Any("/oneapi/proxy/:channelid/*target", controller.Relay)
 		relayV1Router.POST("/completions", controller.Relay)
 		relayV1Router.POST("/chat/completions", controller.Relay)
+		// 阶段3：多协议入口（OpenAI Responses / Anthropic Messages 客户端协议）
+		relayV1Router.POST("/responses", controller.Relay)
+		relayV1Router.POST("/messages", controller.Relay)
 		relayV1Router.POST("/edits", controller.Relay)
 		relayV1Router.POST("/images/generations", controller.Relay)
 		relayV1Router.POST("/images/edits", controller.RelayNotImplemented)

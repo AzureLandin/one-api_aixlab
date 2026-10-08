@@ -36,6 +36,10 @@ func relayHelper(c *gin.Context, relayMode int) *model.ErrorWithStatusCode {
 		err = controller.RelayAudioHelper(c, relayMode)
 	case relaymode.Proxy:
 		err = controller.RelayProxyHelper(c, relayMode)
+	case relaymode.Responses:
+		err = controller.RelayResponsesHelper(c)
+	case relaymode.AnthropicMessages:
+		err = controller.RelayMessagesHelper(c)
 	default:
 		err = controller.RelayTextHelper(c)
 	}

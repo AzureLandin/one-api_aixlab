@@ -7,7 +7,8 @@ REPO="$(cd "$HERE/../.." && pwd)"
 cd "$HERE"
 # 一次性产物放本目录（/tmp 每次 bash 调用是独立命名空间，不能跨调用复用）
 rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
-      tmp_login.json tmp_user.json tmp_l2.json tmp_tk.json tmp_ch.json tmp_relay.json tmp_topup.json
+      tmp_login.json tmp_user.json tmp_l2.json tmp_tk.json tmp_ch.json tmp_relay.json tmp_topup.json \
+      tmp_resp.json tmp_resp2.json tmp_resp3.json tmp_resp4.json tmp_msg.json tmp_msg2.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -99,6 +100,59 @@ echo "$USG" | grep -q '"total_usage":0' && { echo "PASS: usage shim zero"; pass=
 PL=$(curl -s -b jar_user.txt http://127.0.0.1:13000/api/plaza/models)
 echo "plaza: $(echo $PL | head -c 200)"
 if echo "$PL" | grep -q "quota_per_unit\|group_ratio\|input_quota_per_1k\|model_ratio\|display_in_currency"; then echo "FAIL: plaza still has cost fields"; fail=$((fail+1)); else echo "PASS: plaza clean"; pass=$((pass+1)); fi
+
+# 12. /v1/responses 非流式：归一化→OpenAI 兼容上游→渲染 Responses 信封
+CODE=$(curl -s -o tmp_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi"}')
+check "responses 200" 200 "$CODE"
+grep -q '"object":"response"' tmp_resp.json && grep -q '"status":"completed"' tmp_resp.json \
+  && { echo "PASS: responses envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_resp.json)"; fail=$((fail+1)); }
+grep -q '"input_tokens":7' tmp_resp.json && grep -q '"output_tokens":5' tmp_resp.json \
+  && { echo "PASS: responses usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(head -c 200 tmp_resp.json)"; fail=$((fail+1)); }
+
+# 13. /v1/responses §6.4 拒绝规则（明确参数名，不静默降级）
+CODE=$(curl -s -o tmp_resp2.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi","previous_response_id":"resp_x"}')
+check "responses reject previous_response_id" 400 "$CODE"
+grep -q 'previous_response_id' tmp_resp2.json \
+  && { echo "PASS: rejection names param"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_resp2.json)"; fail=$((fail+1)); }
+CODE=$(curl -s -o tmp_resp3.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi","store":true}')
+check "responses reject store=true" 400 "$CODE"
+CODE=$(curl -s -o tmp_resp4.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi","stream":true}')
+check "responses stream deferred (400 in stage 3)" 400 "$CODE"
+
+# 14. /v1/messages 走 x-api-key 鉴权 + 渲染 Anthropic 信封
+CODE=$(curl -s -o tmp_msg.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"system":"s","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}')
+check "messages via x-api-key 200" 200 "$CODE"
+grep -q '"type":"message"' tmp_msg.json && grep -q '"stop_reason":"end_turn"' tmp_msg.json \
+  && { echo "PASS: messages envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_msg.json)"; fail=$((fail+1)); }
+grep -q '"input_tokens":7' tmp_msg.json && grep -q '"output_tokens":5' tmp_msg.json \
+  && { echo "PASS: messages usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(head -c 200 tmp_msg.json)"; fail=$((fail+1)); }
+
+# 15. /v1/messages §6.5 冲突鉴权（x-api-key 与 Authorization 指向不同令牌→401）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H "Authorization: Bearer sk-differenttoken" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}')
+check "messages conflict auth rejected 401" 401 "$CODE"
+
+# 16. /v1/messages 缺 max_tokens → 结构化 400
+CODE=$(curl -s -o tmp_msg2.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"hi"}]}')
+check "messages require max_tokens 400" 400 "$CODE"
+
+# 17. 三种协议入口的成功生成都应落 usage_records（chat + responses + messages 各 1）
+sleep 1
+SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
+[ "$SUC" = 3 ] && { echo "PASS: usage_records 3 success rows (chat+responses+messages)"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 echo
 echo "RESULT pass=$pass fail=$fail"

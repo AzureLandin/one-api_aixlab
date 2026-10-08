@@ -6,6 +6,10 @@ func GetByPath(path string) int {
 	relayMode := Unknown
 	if strings.HasPrefix(path, "/v1/chat/completions") {
 		relayMode = ChatCompletions
+	} else if strings.HasPrefix(path, "/v1/responses") {
+		relayMode = Responses
+	} else if strings.HasPrefix(path, "/v1/messages") {
+		relayMode = AnthropicMessages
 	} else if strings.HasPrefix(path, "/v1/completions") {
 		relayMode = Completions
 	} else if strings.HasPrefix(path, "/v1/embeddings") {
