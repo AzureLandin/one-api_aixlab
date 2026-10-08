@@ -236,4 +236,67 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 6：前端现代化
 
-（待实施）
+### 完成时间
+2026-10-08（提交于阶段 6 commit）
+
+### §9.2 Dashboard 重写
+1. **数据源切换**：`pages/Dashboard/index.js` 弃用旧 `/api/user/dashboard`（按额度聚合），改用阶段 5 的 `/api/usage/*` 事实层接口——`summary`、`trend`（按天）、`by-model`（排行）。请求走统一 `API` 实例（带 `baseURL` 与响应错误处理），不再用裸 `axios`。
+2. **权限分流**：`isAdmin()` 为真走管理端 `/api/usage/{summary,trend,by-model}`，普通用户走 `/api/usage/self/{summary,trend}`（后端无 self 维度排行，非管理员隐藏排行，不做隐式降级）。
+3. **控件**：时间范围下拉（近 7/30/90 天、全部）+ 刷新按钮，随范围变化自动重取（`useCallback` 依赖 `days`）。
+4. **Token 概览卡**：总/输入/输出 Token 与调用次数四张统计卡。
+5. **缓存三指标卡（§9.2 硬要求）**：命中率 `cache_hit_rate`、调用命中率 `call_hit_rate`、覆盖率 `cache_coverage` 各一张，附公式说明。**可空指标为 null 时显示 “—”，绝不显示 0%**（`fmtRate` 对 null/undefined 返回 “—”）；未上报缓存的行数 >0 时，卡片挂 “未上报缓存数据” 标签并另给一条 info 提示“有 N 次调用未上报缓存数据”，同时**覆盖率始终展示**以体现数据可信范围。
+6. **趋势/排行**：Token 与缓存读取按天折线；按模型 Token 排行（柱图 + 明细表，含每模型命中率/覆盖率，null 命中挂 “无数据” 标签）。
+7. **状态**：loading（骨架卡）、error（负面提示）、no-permission（401/403 单独文案）、empty（无数据）。错误分类依据 `e?.response?.status`。
+
+### §9.3 业务页移除余额/充值/倍率/费用
+- **UsersTable**：删除“额度/剩余额度/已用额度”展示列与按额度排序项，改为“请求次数”列 + 每行“用量”入口链接（`/console/usage?user_id=`）；移除 `renderQuota` 依赖。
+- **TokensTable**：删除“已用额度/剩余额度/无限额度”列与按额度排序项，保留令牌身份、状态、创建/到期时间，新增“请求次数”列（`renderNumber`）；`renderQuota`→`renderNumber`。
+- **LogsTable**：删除“额度”列与表头、总消耗额度改为 **Token 总数**；移除“发放额度(topup)”日志类型筛选项；`renderQuota`→`renderNumber`。
+- **OperationSetting**：整体重写，移除额度设置（新用户初始额度、预扣费、额度提醒阈值、单位美元额度、货币显示）与模型/补全/分组倍率设置；仅保留日志清理、渠道监控（响应超时/自动启停）、通用（聊天链接、重试、按令牌统计、近似 token）等非计费项；`getOptions` 改为只回写白名单键。
+- **EditToken**：删除额度输入框、无限额度按钮与额度提示；`remain_quota/unlimited_quota` 不再由用户配置（后端新路径本就强制无限、忽略额度），移除相关 state/import。
+- **EditUser**：删除额度输入框、“发放额度”卡片（旧 `POST /api/topup` 已下线）、当前额度展示与 `grantQuota` 逻辑及未用 import。
+- **helpers/render.js**：删除已无引用的 `renderQuota`/`renderQuotaWithPrompt`（费用展示函数）。
+
+### §9.1 布局基础
+- `index.css` 新增 `.table-scroll`（横向滚动容器 + `-webkit-overflow-scrolling`），Users/Tokens/Logs 三张大表包裹入内，宽表在窄屏横向滚动而不撑破页面。
+- 修正 `colSpan`（去列后 Users=7、Tokens=6、Logs=9）。
+
+### i18n 文案清理（§13）
+- 重写 `dashboard.*`（zh/en，嵌套对象）。新增按用量口径的键：`token.table.request_count`、`token.sort.by_request_count`、`user.table.usage_entry`、`log.total_tokens`。
+- 脚本化删除 **46** 个既无代码引用、又含“额度/倍率/充值/余额/费用/价格/货币/金额/$”的费用键；对其余仍被引用的 5 处文案改写去费用词（渠道详情、分组添加、消费日志、按令牌统计）。复核：引用键中已无费用文案命中。
+
+### 测试与验收
+- `CI=false npm run build`（`web/default`）：exit 0，Dashboard 新代码 0 告警；仅存量 react-hooks/no-unused-vars 提示（非本阶段引入，`Header/Segment` 于旧代码即未用）。
+- 后端不受本阶段影响仍全绿：`go build ./...`、`go vet`、`gofmt -l`（空）、`go test`（排除存量红 `common/image`）12 包 ok（新增 `model/migration` 集成测试包）；`scripts/smoke/run_smoke.sh` `pass=45 fail=0`（本阶段补 `/v1/models` 列表 + `/v1/models/:model` 检索 3 项）。
+- i18n JSON 双份 `json.load` 校验通过，嵌套键解析正确。
+
+
+---
+
+## §13 终局验收清单
+
+逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(45/0)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
+
+- [x] 新请求路径没有额度预扣/扣除/退款/额度不足判断 — 阶段 2（`relay/billing/billing.go` 删除、预扣/退款/不足拒绝全部移除）；冒烟 “relay 200 with zero quota”、“user/token/channel 旧列 untouched”。
+- [x] 新请求路径没有模型/分组倍率计费 — 阶段 2（`billingratio` 仅保留名称枚举用途，不参与计费）。
+- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 “usage_records success/reported 7/5/12”、6 条 success 行。
+- [x] usage 写入按 `request_id` 幂等 — `InsertUsageRecordOnce` + `usage_records.request_id UNIQUE`；迁移集成测试对三种方言断言“同 request_id 二次写入被拒”。
+- [x] 用户 Token 汇总可查询 — `/api/usage/{summary,trend,by-user,by-model,by-channel,by-token}` + `/self` 变体；冒烟 `/api/usage/summary` 三指标校验；Dashboard 消费（阶段 6）。
+- [x] `/v1/chat/completions` 正常 — 冒烟 relay 200 + body（旧流式路径不回归）。
+- [x] `/v1/responses` 正常 — 冒烟 responses 非流式/拒绝项/流式 typed SSE/reported usage。
+- [x] `/v1/messages` 正常 — 冒烟 messages 200/信封/usage/流式/stop_reason 映射/x-api-key 鉴权/冲突 401/缺 max_tokens 400。
+- [x] `/v1/models` 正常 — 本阶段新增冒烟 “/v1/models 200 + list envelope + /v1/models/:model retrieve”。
+- [x] 三种协议流式错误不被吞掉 — `relay/sse` 状态机 `UpstreamErrorNotSwallowed`、`MalformedChunkReturnsError`、`PartialOnAbortAndNoDone`；controller 错误分支 `stream.Error` 终局。
+- [x] 工具参数增量不丢失或串台 — `TestState_ToolArgsGroupedByIndex` + `stream_test` 按 index 分组、不拼接。
+- [x] Prompt Caching 字段被正确归一化 — 阶段 5（`NormalizeUsage`：read/write、nil→not_reported、ptr-0→reported、非法→invalid 保原值）。
+- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=3/7`。
+- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 5 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。
+- [x] Dashboard 显示命中率和覆盖率 — 阶段 6 三指标卡（命中率/调用命中率/覆盖率）。
+- [x] 前端无余额、充值、倍率和费用文案 — 阶段 6 删除 46 个无引用费用键、改写 5 处残留文案、移除 `renderQuota*`；脚本复测引用键中费用词命中为 0。
+- [x] 数据库迁移可重复执行 / 有幂等保护 — `migration.Migrate` 跳过已应用版本；迁移集成测试连跑 3 次 bookkeeping 恒为 {1,2} 不重复；矩阵重启后 `schema_migrations=1,2`。
+- [x] 回滚步骤在测试环境验证 — 迁移矩阵：drop 主/日志库 → 从备份 restore → 重启二进制成功、计数复原（PG、MySQL 均 11/11）。
+- [x] 旧版 SQLite / MySQL / PostgreSQL 主库与独立日志库迁移均验证 — 矩阵对 **PostgreSQL 主库 + 独立日志库** 与 **MySQL 主库 + 独立日志库** 各 11/11；SQLite 由 `TestMigrationSuite_SQLite`（默认随 `go test` 执行）与 42→45 项端到端冒烟覆盖其主库升级。（说明：one-api 中 `LOG_SQL_DSN` 为空即与主库同文件、非 URL DSN 一律走 MySQL，故“独立日志库”仅在 MySQL/PostgreSQL 拓扑下成立并已在该两引擎验证。）
+- [x] 迁移中断重试、重复执行、备份恢复均验证 — 集成测试重复 Migrate x3（中断重试等价）；矩阵备份(drop+restore)恢复；重启幂等。
+- [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
+
+**总门禁**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l`（relay model middleware controller router model/migration）✅ 空 · `go test`（排除存量红 `common/image`）12 包 ✅ · 端到端冒烟 `pass=45 fail=0` ✅ · 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。

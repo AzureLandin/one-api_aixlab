@@ -16,6 +16,17 @@ code {
     font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
 }
 
+/* §9.1: wide tables scroll horizontally instead of forcing the whole page wide. */
+.table-scroll {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.table-scroll > .ui.table {
+    min-width: 100%;
+}
+
 .main-content {
     padding: 4px;
 }

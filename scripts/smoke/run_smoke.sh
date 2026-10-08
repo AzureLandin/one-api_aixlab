@@ -9,7 +9,7 @@ cd "$HERE"
 rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_login.json tmp_user.json tmp_l2.json tmp_tk.json tmp_ch.json tmp_relay.json tmp_topup.json \
       tmp_resp.json tmp_resp2.json tmp_resp3.json tmp_resp4.json tmp_msg.json tmp_msg2.json \
-      tmp_cache.json tmp_sum.json
+      tmp_cache.json tmp_sum.json tmp_models.json tmp_model1.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -68,6 +68,13 @@ CODE=$(curl -s -o tmp_relay.json -w '%{http_code}' -X POST http://127.0.0.1:1300
   -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"hi"}]}')
 check "relay 200 with zero quota" 200 "$CODE"
 grep -Eq '"content": ?"ok"' tmp_relay.json && { echo "PASS: relay body"; pass=$((pass+1)); } || { echo "FAIL: body $(head -c 200 tmp_relay.json)"; fail=$((fail+1)); }
+
+# 5b. /v1/models 正常（OpenAI 列表信封 + 单模型检索）
+CODE=$(curl -s -o tmp_models.json -w '%{http_code}' http://127.0.0.1:13000/v1/models -H "Authorization: Bearer $KEY")
+check "/v1/models 200" 200 "$CODE"
+grep -Eq '"object": ?"list"' tmp_models.json && grep -Eq '"id": ?"gpt-3.5-turbo"' tmp_models.json && { echo "PASS: /v1/models list envelope"; pass=$((pass+1)); } || { echo "FAIL: /v1/models body $(head -c 200 tmp_models.json)"; fail=$((fail+1)); }
+CODE=$(curl -s -o tmp_model1.json -w '%{http_code}' http://127.0.0.1:13000/v1/models/gpt-3.5-turbo -H "Authorization: Bearer $KEY")
+check "/v1/models/:model retrieve 200" 200 "$CODE"
 
 sleep 1
 # 6. usage_records：success + reported，7/5/12

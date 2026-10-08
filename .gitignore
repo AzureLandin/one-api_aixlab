@@ -14,6 +14,9 @@ cmd.md
 temp
 .DS_Store
 .gocache/
+.npmcache/
+web/npm_install*.log
+web/build.log
 
 # 阶段验收冒烟生成物（脚本本身入库）
 /smoke/
@@ -26,3 +29,10 @@ temp
 /scripts/smoke/tmp_*.json
 /scripts/smoke/tmp_*.txt
 /scripts/smoke/tmp_*.h
+/scripts/smoke/matrix_*.dump
+/scripts/smoke/matrix_*.db
+/scripts/smoke/oneapi_matrix.log
+/scripts/smoke/docker_mysql_pull.log
+/web/docker_mysql_pull.log
+/scripts/smoke/matrix_*.dump
+/scripts/smoke/matrix_*.db

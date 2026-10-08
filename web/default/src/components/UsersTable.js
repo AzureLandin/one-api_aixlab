@@ -16,7 +16,6 @@ import { ITEMS_PER_PAGE } from '../constants';
 import {
   renderGroup,
   renderNumber,
-  renderQuota,
   renderText,
 } from '../helpers/render';
 
@@ -186,6 +185,7 @@ const UsersTable = () => {
         />
       </Form>
 
+      <div className='table-scroll'>
       <Table basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
@@ -213,14 +213,7 @@ const UsersTable = () => {
             >
               {t('user.table.group')}
             </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('quota');
-              }}
-            >
-              {t('user.table.quota')}
-            </Table.HeaderCell>
+            <Table.HeaderCell>{t('user.table.request_count')}</Table.HeaderCell>
             <Table.HeaderCell
               style={{ cursor: 'pointer' }}
               onClick={() => {
@@ -269,23 +262,20 @@ const UsersTable = () => {
                   {/*</Table.Cell>*/}
                   <Table.Cell>
                     <Popup
-                      content={t('user.table.remaining_quota')}
-                      trigger={
-                        <Label basic>{renderQuota(user.quota, t)}</Label>
-                      }
-                    />
-                    <Popup
-                      content={t('user.table.used_quota')}
-                      trigger={
-                        <Label basic>{renderQuota(user.used_quota, t)}</Label>
-                      }
-                    />
-                    <Popup
                       content={t('user.table.request_count')}
                       trigger={
                         <Label basic>{renderNumber(user.request_count)}</Label>
                       }
                     />
+                    <Button
+                      size='mini'
+                      basic
+                      as={Link}
+                      to={`/console/usage?user_id=${user.id}`}
+                      title={t('user.table.usage_entry')}
+                    >
+                      {t('user.table.usage_entry')}
+                    </Button>
                   </Table.Cell>
                   <Table.Cell>{renderRole(user.role, t)}</Table.Cell>
                   <Table.Cell>{renderStatus(user.status)}</Table.Cell>
@@ -376,16 +366,6 @@ const UsersTable = () => {
                 options={[
                   { key: '', text: t('user.table.sort.default'), value: '' },
                   {
-                    key: 'quota',
-                    text: t('user.table.sort.by_quota'),
-                    value: 'quota',
-                  },
-                  {
-                    key: 'used_quota',
-                    text: t('user.table.sort.by_used_quota'),
-                    value: 'used_quota',
-                  },
-                  {
                     key: 'request_count',
                     text: t('user.table.sort.by_request_count'),
                     value: 'request_count',
@@ -410,6 +390,7 @@ const UsersTable = () => {
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };

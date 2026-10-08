@@ -4,7 +4,6 @@ import {
   Button,
   Form,
   Header,
-  Message,
   Segment,
   Card,
 } from 'semantic-ui-react';
@@ -16,7 +15,6 @@ import {
   showSuccess,
   timestamp2string,
 } from '../../helpers';
-import { renderQuotaWithPrompt } from '../../helpers/render';
 
 const EditToken = () => {
   const { t } = useTranslation();
@@ -27,14 +25,14 @@ const EditToken = () => {
   const [modelOptions, setModelOptions] = useState([]);
   const originInputs = {
     name: '',
-    remain_quota: isEdit ? 0 : 500000,
+    remain_quota: 0,
     expired_time: -1,
-    unlimited_quota: false,
+    unlimited_quota: true,
     models: [],
     subnet: '',
   };
   const [inputs, setInputs] = useState(originInputs);
-  const { name, remain_quota, expired_time, unlimited_quota } = inputs;
+  const { name, expired_time } = inputs;
   const navigate = useNavigate();
   const handleInputChange = (e, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
@@ -55,10 +53,6 @@ const EditToken = () => {
     } else {
       setInputs({ ...inputs, expired_time: -1 });
     }
-  };
-
-  const setUnlimitedQuota = () => {
-    setInputs({ ...inputs, unlimited_quota: !unlimited_quota });
   };
 
   const loadToken = async () => {
@@ -252,32 +246,6 @@ const EditToken = () => {
                 {t('token.edit.buttons.expire_1_minute')}
               </Button>
             </div>
-            <Message>{t('token.edit.quota_notice')}</Message>
-            <Form.Field>
-              <Form.Input
-                label={`${t('token.edit.quota')}${renderQuotaWithPrompt(
-                  remain_quota,
-                  t
-                )}`}
-                name='remain_quota'
-                placeholder={t('token.edit.quota_placeholder')}
-                onChange={handleInputChange}
-                value={remain_quota}
-                autoComplete='new-password'
-                type='number'
-                disabled={unlimited_quota}
-              />
-            </Form.Field>
-            <Button
-              type={'button'}
-              onClick={() => {
-                setUnlimitedQuota();
-              }}
-            >
-              {unlimited_quota
-                ? t('token.edit.buttons.cancel_unlimited')
-                : t('token.edit.buttons.unlimited_quota')}
-            </Button>
             <Button floated='right' positive onClick={submit}>
               {t('token.edit.buttons.submit')}
             </Button>

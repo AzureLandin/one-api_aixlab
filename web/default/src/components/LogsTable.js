@@ -22,7 +22,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { ITEMS_PER_PAGE } from '../constants';
-import { renderColorLabel, renderQuota } from '../helpers/render';
+import { renderColorLabel, renderNumber } from '../helpers/render';
 import { Link } from 'react-router-dom';
 
 function renderTimestamp(timestamp, request_id) {
@@ -164,7 +164,6 @@ const LogsTable = () => {
 
   const LOG_OPTIONS = [
     { key: '0', text: t('log.type.all'), value: 0 },
-    { key: '1', text: t('log.type.topup'), value: 1 },
     { key: '2', text: t('log.type.usage'), value: 2 },
     { key: '3', text: t('log.type.admin'), value: 3 },
     { key: '4', text: t('log.type.system'), value: 4 },
@@ -311,8 +310,8 @@ const LogsTable = () => {
   return (
     <>
       <Header as='h3'>
-        {t('log.usage_details')}（{t('log.total_quota')}：
-        {showStat && renderQuota(stat.quota, t)}
+        {t('log.usage_details')}（{t('log.total_tokens')}：
+        {showStat && renderNumber(stat.token)}
         {!showStat && (
           <span
             onClick={handleEyeClick}
@@ -408,6 +407,7 @@ const LogsTable = () => {
           onChange={(e, { value }) => setSearchKeyword(value)}
         />
       </Form>
+      <div className='table-scroll'>
       <Table basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
@@ -489,15 +489,6 @@ const LogsTable = () => {
                 >
                   {t('log.table.completion_tokens')}
                 </Table.HeaderCell>
-                <Table.HeaderCell
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    sortLog('quota');
-                  }}
-                  width={1}
-                >
-                  {t('log.table.quota')}
-                </Table.HeaderCell>
               </>
             )}
             <Table.HeaderCell>{t('log.table.detail')}</Table.HeaderCell>
@@ -563,9 +554,6 @@ const LogsTable = () => {
                       <Table.Cell>
                         {log.completion_tokens ? log.completion_tokens : ''}
                       </Table.Cell>
-                      <Table.Cell>
-                        {log.quota ? renderQuota(log.quota, t, 6) : ''}
-                      </Table.Cell>
                     </>
                   )}
 
@@ -577,7 +565,7 @@ const LogsTable = () => {
 
         <Table.Footer>
           <Table.Row>
-            <Table.HeaderCell colSpan={'10'}>
+            <Table.HeaderCell colSpan={'9'}>
               <Select
                 placeholder={t('log.type.select')}
                 options={LOG_OPTIONS}
@@ -606,6 +594,7 @@ const LogsTable = () => {
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };

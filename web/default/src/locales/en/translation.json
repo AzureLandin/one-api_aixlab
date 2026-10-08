@@ -38,7 +38,7 @@
     "title": "Channel Management",
     "search": "Search channels by ID, name and key...",
     "test_notice": "Channel testing only supports chat models, preferring gpt-3.5-turbo. If unavailable, uses the first model in your configured list.",
-    "detail_notice": "Click the detail button below to show balance and set additional test models.",
+    "detail_notice": "Click the details button below to view channel details and set extra test models.",
     "table": {
       "id": "ID",
       "name": "Name",
@@ -90,7 +90,7 @@
       "name_placeholder": "Please enter name",
       "group": "Group",
       "group_placeholder": "Please select groups that can use this channel",
-      "group_addition": "Please edit group multipliers in system settings to add new group:",
+      "group_addition": "You can type a new group name directly:",
       "models": "Models",
       "models_placeholder": "Please select models supported by this channel",
       "model_mapping": "Model Mapping",
@@ -156,8 +156,6 @@
     "table": {
       "name": "Name",
       "status": "Status",
-      "used_quota": "Used Quota",
-      "remain_quota": "Remaining Quota",
       "created_time": "Created Time",
       "expired_time": "Expiry Time",
       "actions": "Actions",
@@ -168,7 +166,8 @@
       "status_disabled": "Disabled",
       "status_expired": "Expired",
       "status_depleted": "Depleted",
-      "status_unknown": "Unknown Status"
+      "status_unknown": "Unknown Status",
+      "request_count": "Requests"
     },
     "buttons": {
       "copy": "Copy",
@@ -192,17 +191,12 @@
       "ip_limit_placeholder": "Please enter allowed subnets, e.g.: 192.168.0.0/24, use commas to separate multiple subnets",
       "expire_time": "Expiry Time",
       "expire_time_placeholder": "Please enter expiry time in yyyy-MM-dd HH:mm:ss format, -1 for no limit",
-      "quota_notice": "Note: Token quota only limits the maximum usage of the token itself, actual usage is subject to account remaining quota.",
-      "quota": "Quota",
-      "quota_placeholder": "Please enter quota",
       "buttons": {
         "never_expire": "Never Expire",
         "expire_1_month": "Expire in 1 Month",
         "expire_1_day": "Expire in 1 Day",
         "expire_1_hour": "Expire in 1 Hour",
         "expire_1_minute": "Expire in 1 Minute",
-        "unlimited_quota": "Set Unlimited Quota",
-        "cancel_unlimited": "Cancel Unlimited Quota",
         "submit": "Submit",
         "cancel": "Cancel"
       },
@@ -227,27 +221,20 @@
     "sort": {
       "placeholder": "Sort By",
       "default": "Default Order",
-      "by_remain": "Sort by Remaining Quota",
-      "by_used": "Sort by Used Quota"
+      "by_request_count": "By requests"
     }
   },
   "common": {
-    "quota": {
-      "display": "Equivalent: ${{amount}}",
-      "display_short": "${{amount}}",
-      "unit": "$"
-    }
+    "quota": {}
   },
   "log": {
     "title": "Operation Log",
     "search": "Search logs...",
     "usage_details": "Usage Details",
-    "total_quota": "Total Quota Used",
     "click_to_view": "Click to View",
     "type": {
       "select": "Select Log Type",
       "all": "All",
-      "topup": "Quota Grant",
       "usage": "Usage",
       "admin": "Admin",
       "system": "System",
@@ -270,14 +257,14 @@
       "username_placeholder": "Optional",
       "prompt_tokens": "Prompt Tokens",
       "completion_tokens": "Completion Tokens",
-      "quota": "Quota",
       "detail": "Detail"
     },
     "buttons": {
       "query": "Action",
       "submit": "Query",
       "refresh": "Refresh"
-    }
+    },
+    "total_tokens": "Total tokens"
   },
   "user": {
     "title": "User Management",
@@ -291,9 +278,7 @@
       "display_name_placeholder": "Please enter new display name",
       "group": "Group",
       "group_placeholder": "Please select group",
-      "group_addition": "Please edit group multipliers in system settings to add new group:",
-      "quota": "Remaining Quota",
-      "quota_placeholder": "Please enter new remaining quota",
+      "group_addition": "You can type a new group name directly:",
       "email": "Linked Email Account",
       "email_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
       "buttons": {
@@ -301,14 +286,10 @@
         "cancel": "Cancel",
         "grant": "Grant"
       },
-      "grant_title": "Grant Quota",
-      "grant_notice": "Add quota for this user; the grant will be recorded in the logs.",
       "grant_amount": "Amount",
-      "grant_amount_placeholder": "Enter the quota amount to grant",
       "grant_remark": "Remark",
       "grant_remark_placeholder": "Reason for the grant, optional",
-      "grant_invalid_amount": "Please enter an amount greater than 0",
-      "current_quota": "Current remaining quota:"
+      "grant_invalid_amount": "Please enter an amount greater than 0"
     },
     "add": {
       "title": "Create New User Account"
@@ -316,20 +297,16 @@
     "messages": {
       "update_success": "User information updated successfully!",
       "create_success": "User account created successfully!",
-      "operation_success": "Operation completed successfully!",
-      "grant_success": "Quota granted successfully!"
+      "operation_success": "Operation completed successfully!"
     },
     "search": "Search users...",
     "table": {
       "id": "ID",
       "username": "Username",
       "group": "Group",
-      "quota": "Quota",
       "role_text": "Role",
       "status_text": "Status",
       "actions": "Actions",
-      "remaining_quota": "Remaining Quota",
-      "used_quota": "Used Quota",
       "request_count": "Request Count",
       "role_types": {
         "normal": "Normal User",
@@ -344,11 +321,10 @@
       },
       "sort": {
         "default": "Default Order",
-        "by_quota": "Sort by Remaining Quota",
-        "by_used_quota": "Sort by Used Quota",
         "by_request_count": "Sort by Request Count"
       },
-      "sort_by": "Sort By"
+      "sort_by": "Sort By",
+      "usage_entry": "Usage"
     },
     "buttons": {
       "add": "Add New User",
@@ -362,26 +338,53 @@
     }
   },
   "dashboard": {
+    "title": "Dashboard",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "empty": "No data",
+    "range": {
+      "7d": "Last 7 days",
+      "30d": "Last 30 days",
+      "90d": "Last 90 days",
+      "all": "All time"
+    },
+    "cards": {
+      "total_tokens": "Total tokens",
+      "input_tokens": "Input tokens",
+      "output_tokens": "Output tokens",
+      "requests": "Requests"
+    },
+    "cache": {
+      "hit_rate": "Cache hit rate",
+      "hit_rate_hint": "Σ cache_read / Σ reported input tokens",
+      "call_hit_rate": "Call hit rate",
+      "call_hit_rate_hint": "hit calls / calls reporting cache data",
+      "coverage": "Cache coverage",
+      "coverage_hint": "reported-cache calls / generated calls",
+      "read": "Cache-read tokens",
+      "na": "N/A",
+      "not_reported": "Cache data not reported",
+      "unreported_notice": "{{count}} calls did not report cache data (shown as “—”, not a 0% hit)."
+    },
     "charts": {
-      "requests": {
-        "title": "Model Request Trend",
-        "tooltip": "Request Count"
-      },
-      "quota": {
-        "title": "Quota Usage Trend",
-        "tooltip": "Quota Used"
-      },
       "tokens": {
-        "title": "Token Usage Trend",
-        "tooltip": "Token Count"
+        "title": "Token usage trend",
+        "tooltip": "tokens"
+      },
+      "requests": {
+        "title": "Request trend",
+        "tooltip": "requests"
       }
     },
-    "statistics": {
-      "title": "Statistics",
-      "tooltip": {
-        "date": "Date",
-        "value": "Value"
-      }
+    "ranking": {
+      "by_model": "Top models"
+    },
+    "table": {
+      "model": "Model"
+    },
+    "error": {
+      "load": "Failed to load data, please retry",
+      "no_permission": "No permission to view this data"
     }
   },
   "setting": {
@@ -473,36 +476,17 @@
     },
     "operation": {
       "quota": {
-        "title": "Quota Settings",
-        "new_user": "Initial Quota for New Users",
-        "new_user_placeholder": "e.g.: 100",
-        "pre_consume": "Pre-consumed Quota per Request",
-        "pre_consume_placeholder": "Refund or charge difference after request",
-        "buttons": {
-          "save": "Save Quota Settings"
-        }
+        "buttons": {}
       },
       "ratio": {
-        "title": "Ratio Settings",
-        "model": {
-          "title": "Model Ratio",
-          "placeholder": "A JSON text where keys are model names and values are ratios"
-        },
-        "completion": {
-          "title": "Completion Ratio",
-          "placeholder": "A JSON text where keys are model names and values are ratios. These ratios are the proportion of completion to prompt ratio, which can override One API's internal ratios"
-        },
-        "group": {
-          "title": "Group Ratio",
-          "placeholder": "A JSON text where keys are group names and values are ratios"
-        },
-        "buttons": {
-          "save": "Save Ratio Settings"
-        }
+        "model": {},
+        "completion": {},
+        "group": {},
+        "buttons": {}
       },
       "log": {
         "title": "Log Settings",
-        "enable_consume": "Enable Quota Consumption Logging",
+        "enable_consume": "Enable request consumption logging",
         "target_time": "Target Time",
         "buttons": {
           "clean": "Clean Historical Logs"
@@ -512,8 +496,6 @@
         "title": "Monitor Settings",
         "max_response_time": "Maximum Response Time",
         "max_response_time_placeholder": "In seconds, channels exceeding this time during testing will be automatically disabled",
-        "quota_reminder": "Quota Reminder Threshold",
-        "quota_reminder_placeholder": "Users will receive email reminders when quota falls below this value",
         "auto_disable": "Automatically Disable Channel on Failure",
         "auto_enable": "Automatically Enable Channel on Success",
         "buttons": {
@@ -524,12 +506,9 @@
         "title": "General Settings",
         "chat_link": "Chat Page Link",
         "chat_link_placeholder": "e.g.: ChatGPT Next Web deployment address",
-        "quota_per_unit": "Quota per Dollar",
-        "quota_per_unit_placeholder": "Quota exchangeable per unit of currency",
         "retry_times": "Retry Times on Failure",
         "retry_times_placeholder": "Number of retry attempts on failure",
-        "display_in_currency": "Display Quota in Currency Format",
-        "display_token_stat": "Show Token Quota Instead of User Quota in Billing APIs",
+        "display_token_stat": "Aggregate usage by token dimension",
         "approximate_token": "Use Approximate Method to Estimate Token Count",
         "buttons": {
           "save": "Save General Settings"
