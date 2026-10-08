@@ -24,13 +24,6 @@ type messagesRequest struct {
 	ToolChoice    json.RawMessage `json:"tool_choice"`
 }
 
-// MessagesStreamUnsupported reports the Messages streaming capability gap
-// (finalized in stage 4, implementation doc §7).
-func MessagesStreamUnsupported() *ProtocolError {
-	return unsupportedField("stream",
-		"/v1/messages 流式（message_start/content_block_delta/... 事件）在阶段 4 实现，当前请使用非流式")
-}
-
 // ParseMessages converts a /v1/messages request body into the normalized
 // GeneralOpenAIRequest intermediate structure.
 func ParseMessages(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolError) {

@@ -122,10 +122,21 @@ CODE=$(curl -s -o tmp_resp3.json -w '%{http_code}' -X POST http://127.0.0.1:1300
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"model":"gpt-3.5-turbo","input":"hi","store":true}')
 check "responses reject store=true" 400 "$CODE"
-CODE=$(curl -s -o tmp_resp4.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+
+# 13b. /v1/responses 流式：typed SSE 事件（阶段 4 §7），不再是 400
+curl -s -N -D tmp_resp_sse.h -o tmp_resp_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-3.5-turbo","input":"hi","stream":true}')
-check "responses stream deferred (400 in stage 3)" 400 "$CODE"
+  -d '{"model":"gpt-3.5-turbo","input":"hi","stream":true}'
+grep -qi 'text/event-stream' tmp_resp_sse.h \
+  && { echo "PASS: responses stream content-type"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_resp_sse.h)"; fail=$((fail+1)); }
+grep -q 'event: response.created' tmp_resp_sse.txt \
+  && grep -q 'event: response.output_text.delta' tmp_resp_sse.txt \
+  && grep -q 'event: response.completed' tmp_resp_sse.txt \
+  && { echo "PASS: responses typed SSE events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '"delta":"o"' tmp_resp_sse.txt && grep -q '"delta":"k"' tmp_resp_sse.txt \
+  && { echo "PASS: responses deltas not concatenated"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '"input_tokens":7' tmp_resp_sse.txt && grep -q '"output_tokens":5' tmp_resp_sse.txt \
+  && { echo "PASS: responses stream reported usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(tail -c 400 tmp_resp_sse.txt)"; fail=$((fail+1)); }
 
 # 14. /v1/messages 走 x-api-key 鉴权 + 渲染 Anthropic 信封
 CODE=$(curl -s -o tmp_msg.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
@@ -136,6 +147,19 @@ grep -q '"type":"message"' tmp_msg.json && grep -q '"stop_reason":"end_turn"' tm
   && { echo "PASS: messages envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_msg.json)"; fail=$((fail+1)); }
 grep -q '"input_tokens":7' tmp_msg.json && grep -q '"output_tokens":5' tmp_msg.json \
   && { echo "PASS: messages usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(head -c 200 tmp_msg.json)"; fail=$((fail+1)); }
+
+# 14b. /v1/messages 流式：typed Anthropic SSE（message_start/…/message_stop，阶段 4 §7）
+curl -s -N -D tmp_msg_sse.h -o tmp_msg_sse.txt -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}'
+grep -qi 'text/event-stream' tmp_msg_sse.h \
+  && { echo "PASS: messages stream content-type"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_msg_sse.h)"; fail=$((fail+1)); }
+grep -q 'event: message_start' tmp_msg_sse.txt \
+  && grep -q 'event: content_block_delta' tmp_msg_sse.txt \
+  && grep -q 'event: message_stop' tmp_msg_sse.txt \
+  && { echo "PASS: messages typed SSE events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_msg_sse.txt)"; fail=$((fail+1)); }
+grep -q '"stop_reason":"end_turn"' tmp_msg_sse.txt \
+  && { echo "PASS: messages finish_reason→stop_reason mapping"; pass=$((pass+1)); } || { echo "FAIL: $(tail -c 400 tmp_msg_sse.txt)"; fail=$((fail+1)); }
 
 # 15. /v1/messages §6.5 冲突鉴权（x-api-key 与 Authorization 指向不同令牌→401）
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
@@ -149,10 +173,18 @@ CODE=$(curl -s -o tmp_msg2.json -w '%{http_code}' -X POST http://127.0.0.1:13000
   -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"hi"}]}')
 check "messages require max_tokens 400" 400 "$CODE"
 
-# 17. 三种协议入口的成功生成都应落 usage_records（chat + responses + messages 各 1）
+# 17. 三种协议入口的成功生成都应落 usage_records
+#     chat(1) + responses 非流式(1) + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 5
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 3 ] && { echo "PASS: usage_records 3 success rows (chat+responses+messages)"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 5 ] && { echo "PASS: usage_records 5 success rows (chat+responses±stream+messages±stream)"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+
+# 18. 流式行应以 reported 收尾（mock 发了 usage 尾块），绝不为零命中伪造
+REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
+[ "$REP" = 5 ] && { echo "PASS: all 5 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+# 19. 无缓存上报的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
+NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
+[ "$NR" = 5 ] && { echo "PASS: not_reported cache status where upstream silent"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
 
 echo
 echo "RESULT pass=$pass fail=$fail"

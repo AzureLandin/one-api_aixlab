@@ -6,7 +6,7 @@ import (
 )
 
 func i64(v int64) *int64 { return &v }
-func ip(v int) *int       { return &v }
+func ip(v int) *int      { return &v }
 
 func TestNormalizeUsageNotReported(t *testing.T) {
 	u := &Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}

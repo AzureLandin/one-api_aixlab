@@ -186,7 +186,30 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 4：流式与 Usage 收尾
 
-（待实施）
+### 完成时间
+2026-10-08（提交于阶段 4 commit）
+
+### 实施内容
+1. **可复用 SSE 读取器 `relay/sse/reader.go`**：按 SSE 帧法解析（`field: value`、空行分隔事件、多行 `data:` 以 `\n` 合并、`event:` 类型、`id:`、注释/keep-alive 行忽略、`[DONE]` 终止标记）。用 `bufio.Scanner` + 可增长缓冲（上限 1MB），**不假设一次 Read 对应一个完整 JSON**——只在空行/EOF 边界产出完整事件；EOF 未换行结尾的尾事件也会被冲刷。`ErrUpstreamEOF` 用于区分“网络中断（未见终止标记）”与正常结束。
+2. **可复用 SSE 写出器 `relay/sse/writer.go`**：`Writer.Event(type, data)` 产出 `event: <type>\ndata: <json>\n\n`（§6.4 “流式事件必须有明确事件类型，不能拼成一条非标字符串”）；多行 data 逐行加 `data:` 前缀；实现者若为 `http.Flusher`（gin Writer 即是）则每个事件即时 flush。`Raw`/`Done` 供 OpenAI 风格透传；`SetEventStreamHeaders` 统一 SSE 响应头。
+3. **每请求流式状态 `relay/sse/state.go`**：`StreamState` 在规范化 OpenAI `chat.completion.chunk`（导出的 `Chunk` 视图，含每工具调用 `index`）上累加——`request_id/response_id/text/usage/finish_reason/upstream error` 各归其位；**工具参数增量按 `index` 分组累加**（OpenAI 仅在首个分片带 `id`/`name`，后续只带 `index`+参数片段，按 index 归组避免串台），结束时可得完整参数串。`TerminalStatus(aborted)`：有上游 error event→`error`；未见 `[DONE]` 或被中断→`partial`；否则 `success`。`FinalizeUsage`：reported 上报值优先→`NormalizeUsage`；否则按 `counter(累计文本+全部工具参数)` 估算→`usage_source=estimated`；无 counter 且无上报→返回 nil（只记状态+空 usage，**绝不把空 usage 伪造成零缓存命中**）。
+4. **两种协议 typed SSE 渲染器**：`relay/protocol/stream_responses.go`（`response.created/in_progress/output_item.added/content_part.added/output_text.delta/output_text.done/content_part.done/output_item.done/function_call_arguments.delta/done/completed|failed`，`length`→`incomplete` 状态）与 `relay/protocol/stream_messages.go`（`message_start/content_block_start/content_block_delta(text_delta|input_json_delta)/content_block_stop/message_delta(stop_reason+usage)/message_stop/error`，finish_reason→Anthropic stop_reason 逆映射）。`Error(e)` 为终止事件，后续 `Finish` 不再追加（错误不被吞掉且互斥）。
+5. **入口接线 `relay/controller/protocol.go`**：移除阶段 3 的 `stream=true→点名 400` 拒绝（`ResponsesStreamUnsupported`/`MessagesStreamUnsupported` 死代码删除）。`relayProtocolHelper` 在 `normalized.Stream` 时走新 `relayProtocolStream`：置 `meta.IsStream`、补 `stream_options.include_usage` 让 OpenAI 兼容上游发 usage 尾块；`reader.Next()` 循环内先查 `ctx.Err()`（客户端断开）→`aborted`；写失败也判 `aborted`；malformed chunk 跳过重发但继续累加（不污染状态、不吞）；上游 error event→`stream.Error` 并记 `error` 行。收尾**恰好一次**：`FinalizeUsage`→`recordUsage(status)`+`go recordConsumeLog`；断流按 `partial` 落库并尽力关闭上游。响应 ID 用 `resp_<request_id>`（稳定），messages 工厂改写为 `msg_` 命名空间。
+
+### §7 收口对照
+- §7.1 读取器：多行 data/空行分隔/event 类型/`[DONE]`/网络中断/上游 error/跨事件 JSON 分片，均由 `sse.Reader` + `StreamState` 覆盖并有单测。
+- §7.2 事件状态：`StreamState` 持有 response_id/工具调用 ID 分组累加/文本累加/usage 累加/上游 error/终止状态；上报优先、否则估算、再否则空 usage 不伪造零命中——单测逐条覆盖（`state_test.go`）。
+- §7.3 客户端断开：`ctx.Err()`/写失败→停止写、关闭上游、`recordUsage` 以 `partial` 收尾一次。
+
+### 明确限制（后续阶段）
+- **仅 OpenAI 兼容上游流式**：与阶段 3 一致，非 OpenAI 上游仍返回 `upstream_protocol_unsupported`；Anthropic/AWS 等原生上游协议矩阵在后续扩展。
+- **`/v1/chat/completions` 既有透传未改动**：仍走 `openai.StreamHandler` 原样透传（含 reported/estimated usage 收尾），避免破坏大量渠道；新 `sse` 层与 typed 渲染当前只服务 `/v1/responses`、`/v1/messages`。chat 路径的 `partial`/错误不吞如需统一到 `sse` 层，留待评估后再迁移（改动面大）。
+- 缓存字段归一化与三指标贯通 adaptor 属阶段 5。
+
+### 测试与验收
+- 新增单测：`relay/sse/reader_test.go`（多行 data/event 类型/注释/尾事件冲刷/跨分片）、`relay/sse/writer_test`（并入 reader_test，帧法与多行前缀）、`relay/sse/state_test.go`（文本+finish、**工具参数按 index 分组不串台**、reported 优先、estimated 含工具参数、无估算返回 nil、上游 error 不吞、abort/无 DONE→partial、malformed 报错）、`relay/protocol/stream_test.go`（Responses/Messages typed 事件序列、delta 不拼接、工具参数不串台、error 事件终止性、stop_reason 映射、message_start 提示种子）。
+- 冒烟（`scripts/smoke/`，mock 上游升级为 `stream=true` 时发真实 OpenAI SSE：两段文本 delta + usage 尾块 + `[DONE]`）：新增 responses 流式 content-type/typed 事件/delta 不拼接/reported usage，messages 流式 content-type/typed 事件/finish_reason→stop_reason；收尾计数改为 5 条 success（chat + responses 非流式/流式 + messages 非流式/流式）、全部 `usage_source=reported`、上游未报缓存时 `cache_usage_status=not_reported`。`RESULT pass=38 fail=0`。
+- `go build ./...`、`gofmt -l`（含全仓 relay/model/middleware/controller/router）、`go vet`、`go test`（排除存量红 `common/image`）全部通过。
 
 ## 阶段 5：缓存归一化
 

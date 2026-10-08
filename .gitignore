@@ -24,3 +24,5 @@ temp
 /scripts/smoke/smoke.out
 /scripts/smoke/jar_*.txt
 /scripts/smoke/tmp_*.json
+/scripts/smoke/tmp_*.txt
+/scripts/smoke/tmp_*.h

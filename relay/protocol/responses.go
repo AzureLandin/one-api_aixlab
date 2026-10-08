@@ -31,14 +31,6 @@ type responsesRequest struct {
 	User               string          `json:"user"`
 }
 
-// ResponsesStreamUnsupported reports whether a Responses request asked for
-// streaming, which is finalized in stage 4 (implementation doc §7). Callers
-// surface it as an explicit structured error rather than degrading silently.
-func ResponsesStreamUnsupported() *ProtocolError {
-	return unsupportedField("stream",
-		"/v1/responses 流式（typed SSE events）在阶段 4 实现，当前请使用非流式或 /v1/chat/completions")
-}
-
 // ParseResponses converts a /v1/responses request body into the normalized
 // GeneralOpenAIRequest intermediate structure (§6.1 step 2).
 func ParseResponses(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolError) {
