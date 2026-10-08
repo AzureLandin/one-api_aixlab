@@ -2,7 +2,6 @@ package model
 
 import (
 	"errors"
-	"fmt"
 
 	"gorm.io/gorm"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/message"
 )
 
 const (
@@ -71,12 +69,12 @@ func ValidateUserToken(key string) (token *Token, err error) {
 		}
 		return nil, errors.New("令牌验证失败")
 	}
-	if token.Status == TokenStatusExhausted {
-		return nil, fmt.Errorf("令牌 %s（#%d）额度已用尽", token.Name, token.Id)
-	} else if token.Status == TokenStatusExpired {
+	if token.Status == TokenStatusExpired {
 		return nil, errors.New("该令牌已过期")
 	}
-	if token.Status != TokenStatusEnabled {
+	// 阶段2：额度不再作为放行条件（implementation doc §5.2/§5.3）。
+	// 历史 TokenStatusExhausted（额度用尽）令牌同样放行，状态列保留兼容读取。
+	if token.Status != TokenStatusEnabled && token.Status != TokenStatusExhausted {
 		return nil, errors.New("该令牌状态不可用")
 	}
 	if token.ExpiredTime != -1 && token.ExpiredTime < helper.GetTimestamp() {
@@ -88,17 +86,6 @@ func ValidateUserToken(key string) (token *Token, err error) {
 			}
 		}
 		return nil, errors.New("该令牌已过期")
-	}
-	if !token.UnlimitedQuota && token.RemainQuota <= 0 {
-		if !common.RedisEnabled {
-			// in this case, we can make sure the token is exhausted
-			token.Status = TokenStatusExhausted
-			err := token.SelectUpdate()
-			if err != nil {
-				logger.SysError("failed to update token status" + err.Error())
-			}
-		}
-		return nil, errors.New("该令牌额度已用尽")
 	}
 	return token, nil
 }
@@ -170,6 +157,8 @@ func DeleteTokenById(id int, userId int) (err error) {
 	return token.Delete()
 }
 
+// LEGACY(阶段2)：额度写路径已停用，仅供旧管理页面兼容与回滚。
+// 新请求链路不得调用本函数；额度语义以 usage_records 为准。
 func IncreaseTokenQuota(id int, quota int64) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -192,6 +181,8 @@ func increaseTokenQuota(id int, quota int64) (err error) {
 	return err
 }
 
+// LEGACY(阶段2)：额度写路径已停用，仅供旧管理页面兼容与回滚。
+// 新请求链路不得调用本函数；额度语义以 usage_records 为准。
 func DecreaseTokenQuota(id int, quota int64) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -214,84 +205,6 @@ func decreaseTokenQuota(id int, quota int64) (err error) {
 	return err
 }
 
-func PreConsumeTokenQuota(tokenId int, quota int64) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
-	}
-	token, err := GetTokenById(tokenId)
-	if err != nil {
-		return err
-	}
-	if !token.UnlimitedQuota && token.RemainQuota < quota {
-		return errors.New("令牌额度不足")
-	}
-	userQuota, err := GetUserQuota(token.UserId)
-	if err != nil {
-		return err
-	}
-	if userQuota < quota {
-		return errors.New("用户额度不足")
-	}
-	quotaTooLow := userQuota >= config.QuotaRemindThreshold && userQuota-quota < config.QuotaRemindThreshold
-	noMoreQuota := userQuota-quota <= 0
-	if quotaTooLow || noMoreQuota {
-		go func() {
-			email, err := GetUserEmail(token.UserId)
-			if err != nil {
-				logger.SysError("failed to fetch user email: " + err.Error())
-			}
-			prompt := "额度提醒"
-			var contentText string
-			if noMoreQuota {
-				contentText = "您的额度已用尽"
-			} else {
-				contentText = "您的额度即将用尽"
-			}
-			if email != "" {
-				content := message.EmailTemplate(
-					prompt,
-					fmt.Sprintf(`
-						<p>您好！</p>
-						<p>%s，当前剩余额度为 <strong>%d</strong>。</p>
-						<p>如需继续使用，请联系管理员为您发放额度。</p>
-					`, contentText, userQuota),
-				)
-				err = message.SendEmail(prompt, email, content)
-				if err != nil {
-					logger.SysError("failed to send email: " + err.Error())
-				}
-			}
-		}()
-	}
-	if !token.UnlimitedQuota {
-		err = DecreaseTokenQuota(tokenId, quota)
-		if err != nil {
-			return err
-		}
-	}
-	err = DecreaseUserQuota(token.UserId, quota)
-	return err
-}
-
-func PostConsumeTokenQuota(tokenId int, quota int64) (err error) {
-	token, err := GetTokenById(tokenId)
-	if err != nil {
-		return err
-	}
-	if quota > 0 {
-		err = DecreaseUserQuota(token.UserId, quota)
-	} else {
-		err = IncreaseUserQuota(token.UserId, -quota)
-	}
-	if !token.UnlimitedQuota {
-		if quota > 0 {
-			err = DecreaseTokenQuota(tokenId, quota)
-		} else {
-			err = IncreaseTokenQuota(tokenId, -quota)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// PreConsumeTokenQuota / PostConsumeTokenQuota were removed in stage 2:
+// the request path no longer pre-consumes, settles or refunds quota.
+// The remain_quota/used_quota columns stay for legacy reads only.

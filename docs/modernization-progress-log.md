@@ -107,7 +107,31 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## 阶段 2：移除额度与倍率
 
-（待实施）
+完成内容（2026-10-08，提交见 git log `refactor(quota):`）：
+
+按实施文档 §5.1 顺序执行（接入 recorder → 并行验证（阶段1已做）→ 删除预扣/耗尽/退款 → 统计迁移 → 倍率计算删除 → 停止写旧列 → 充值 deprecated → API/前端不返回费用倍率）：
+
+1. **relay 请求路径额度全删除**
+   - `relay/controller/helper.go`：`getPreConsumedQuota/preConsumeQuota/postConsumeQuota` 删除；新增 `recordConsumeLog`（旧 `logs` 表继续写行以保持日志页可用，`Quota=0`，内容改为“用量：输入 X / 输出 Y tokens”）。
+   - `relay/controller/text.go`：modelRatio/groupRatio/completionRatio 计算、预扣、退款、结算调用全部移除；错误路径同步 `recordUsage(status=error)`，成功路径异步 recorder + 消费日志。
+   - `relay/controller/image.go`：costRatio/ratio/额度检查/`PostConsumeTokenQuota`/`CacheUpdateUserQuota`/`UpdateUserUsedQuota`/`UpdateChannelUsedQuota` 移除；消费日志改为“生成 N 张图片”。
+   - `relay/controller/audio.go`：TTS 预扣、退款 defer、`billing.PostConsumeQuota` 移除；转写输出 token 仅作本地估算入 `usage_records`；消费日志 quota=0。
+   - `relay/billing/billing.go` 整文件删除（无任何调用者）。
+2. **放行条件去额度**
+   - `model/token.go` `ValidateUserToken`：删除 `RemainQuota<=0` 拒绝与 `TokenStatusExhausted` 写入；历史 Exhausted 令牌直接放行；`PreConsumeTokenQuota/PostConsumeTokenQuota` 删除（含额度提醒邮件）。
+   - `controller/token.go`：启用令牌时不再因额度耗尽拒绝；`AddToken/UpdateToken` 忽略请求中的额度输入（新令牌固定 `remain_quota=0 + unlimited_quota=true` 占位，更新保留原值）。
+3. **旧列停止写入（§5.3 兼容读取）**：`UpdateUserUsedQuotaAndRequestCount`、`UpdateChannelUsedQuota`、`Increase/DecreaseUserQuota`、`Increase/DecreaseTokenQuota`、`Cache*UserQuota` 全部无调用者，标注 `LEGACY(阶段2)`；新用户注册不再赠送额度（quota 固定 0），`AdminTopUp` 改 410 Gone 明确 deprecated；`UpdateUser` 忽略 quota 输入（保留原值），quota 修改日志删除。
+4. **费用/倍率展示移除**
+   - `controller/plaza.go`：API 不再返回 `model_ratio/completion_ratio/group_ratio/input_quota_per_1k/output_quota_per_1k/quota_per_unit/display_in_currency/ratio_configured/ratio_varies`；仅保留可用性（模型 → 渠道 id/名称/类型/状态/优先级）。
+   - `controller/billing.go`：`/v1/dashboard/billing/subscription|usage` 退化为纯协议兼容占位（固定“不限额”结构 + `total_usage:0`），不再读 quota 列；注释明确“不代表计量数据”。
+   - `web/default/src/pages/Plaza/index.js` + i18n（zh/en）：删除费用/倍率列与文案（旧前端阶段 6 整体重写，此处仅消除对已删字段的依赖，防止 undefined 破坏页面）。
+5. **保留项（有意不删）**：`relay/billing/ratio` 包保留——`controller/group.go` 用 `GroupRatio` 键枚举分组名、`openai/token.go` 枚举模型名、`image.go` 用 `ImageOriginModelName` 做模型映射（均为名称/映射用途，不参与计费）；`users.quota/used_quota`、`tokens.remain_quota/used_quota`、`channels.used_quota` 列与 `/api/user/self`、`/api/log/stat` 的 quota 读取保留给旧管理页（阶段 6 前端移除展示）；`options` 中倍率/额度配置键仍可读写但仅影响已停用的枚举表。
+6. **端到端验收**：`scripts/smoke/run_smoke.sh` + `scripts/smoke/mock_upstream.py`（SQLite + mock 上游，17 项断言全过）：
+   - quota=0 用户 + quota=0 令牌调用 `/v1/chat/completions` → 200 且响应正常（不再有任何余额/预扣拒绝）。
+   - `usage_records` 写入 `success|reported|7|5|12`；上游 401 场景写入 `estimated|error`（阶段 1 行为复验）。
+   - 旧 `logs` 消费行 `quota=0`，内容“用量：输入 7 / 输出 5 tokens”；`users(0|0|0)`、`tokens.used_quota(0)`、`channels.used_quota(0)` 均未被新请求写入。
+   - `POST /api/topup` → 410；`/v1/dashboard/billing/*` 返回占位；`/api/plaza/models` 无费用字段。
+7. **测试**：`go build ./...` 通过；`go test`（除存量红的 `common/image`）全部通过；`gofmt` 已格式化。
 
 ## 阶段 3：多 API 格式路由
 

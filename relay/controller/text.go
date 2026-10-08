@@ -17,8 +17,6 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -42,18 +40,9 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	meta.ActualModelName = textRequest.Model
 	// set system prompt if not empty
 	systemPromptReset := setSystemPrompt(ctx, textRequest, meta.ForcedSystemPrompt)
-	// get model ratio & group ratio
-	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
-	groupRatio := billingratio.GetGroupRatio(meta.Group)
-	ratio := modelRatio * groupRatio
-	// pre-consume quota
+	// estimate prompt tokens for usage fallback (no quota involved anymore)
 	promptTokens := getPromptTokens(textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens
-	preConsumedQuota, bizErr := preConsumeQuota(ctx, textRequest, promptTokens, ratio, meta)
-	if bizErr != nil {
-		logger.Warnf(ctx, "preConsumeQuota failed: %+v", *bizErr)
-		return bizErr
-	}
 
 	adaptor := relay.GetAdaptor(meta.APIType)
 	if adaptor == nil {
@@ -75,7 +64,6 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
 		recordUsage(ctx, meta, textRequest, nil, model.UsageStatusError)
 		return RelayErrorHandler(resp)
 	}
@@ -84,12 +72,11 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
 	if respErr != nil {
 		logger.Errorf(ctx, "respErr is not nil: %+v", respErr)
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
 		recordUsage(ctx, meta, textRequest, usage, model.UsageStatusError)
 		return respErr
 	}
-	// post-consume quota
-	go postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, modelRatio, groupRatio, systemPromptReset)
+	// legacy consumption log (quota-free) + usage fact
+	go recordConsumeLog(ctx, usage, meta, textRequest, systemPromptReset)
 	go recordUsage(ctx, meta, textRequest, usage, model.UsageStatusSuccess)
 	return nil
 }

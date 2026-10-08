@@ -299,6 +299,8 @@ func GetUserGroup(id int) (group string, err error) {
 	return group, err
 }
 
+// LEGACY(阶段2)：额度写路径已停用，仅供旧管理页面兼容与回滚。
+// 新请求链路不得调用本函数；额度语义以 usage_records 为准。
 func IncreaseUserQuota(id int, quota int64) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -315,6 +317,8 @@ func increaseUserQuota(id int, quota int64) (err error) {
 	return err
 }
 
+// LEGACY(阶段2)：额度写路径已停用，仅供旧管理页面兼容与回滚。
+// 新请求链路不得调用本函数；额度语义以 usage_records 为准。
 func DecreaseUserQuota(id int, quota int64) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -336,6 +340,8 @@ func GetRootUserEmail() (email string) {
 	return email
 }
 
+// LEGACY(阶段2)：额度写路径已停用，仅供旧管理页面兼容与回滚。
+// 新请求链路不得调用本函数；额度语义以 usage_records 为准。
 func UpdateUserUsedQuotaAndRequestCount(id int, quota int64) {
 	if config.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUsedQuota, id, quota)

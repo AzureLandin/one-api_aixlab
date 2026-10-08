@@ -140,14 +140,16 @@ func AddToken(c *gin.Context) {
 	}
 
 	cleanToken := model.Token{
-		UserId:         c.GetInt(ctxkey.Id),
-		Name:           token.Name,
-		Key:            random.GenerateKey(),
-		CreatedTime:    helper.GetTimestamp(),
-		AccessedTime:   helper.GetTimestamp(),
-		ExpiredTime:    token.ExpiredTime,
-		RemainQuota:    token.RemainQuota,
-		UnlimitedQuota: token.UnlimitedQuota,
+		UserId:       c.GetInt(ctxkey.Id),
+		Name:         token.Name,
+		Key:          random.GenerateKey(),
+		CreatedTime:  helper.GetTimestamp(),
+		AccessedTime: helper.GetTimestamp(),
+		ExpiredTime:  token.ExpiredTime,
+		// 阶段2：忽略请求中的额度输入。旧 quota 列仅以固定占位值创建
+		// （无限额标记 + 0 余额），不再作为放行条件，也不再被新请求写入。
+		RemainQuota:    0,
+		UnlimitedQuota: true,
 		Models:         token.Models,
 		Subnet:         token.Subnet,
 	}
@@ -221,13 +223,7 @@ func UpdateToken(c *gin.Context) {
 			})
 			return
 		}
-		if cleanToken.Status == model.TokenStatusExhausted && cleanToken.RemainQuota <= 0 && !cleanToken.UnlimitedQuota {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "令牌可用额度已用尽，无法启用，请先修改令牌剩余额度，或者设置为无限额度",
-			})
-			return
-		}
+		// 额度耗尽不再阻止启用：令牌只保留身份、权限、有效期、状态语义
 	}
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
@@ -235,8 +231,7 @@ func UpdateToken(c *gin.Context) {
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime
-		cleanToken.RemainQuota = token.RemainQuota
-		cleanToken.UnlimitedQuota = token.UnlimitedQuota
+		// 阶段2：额度输入被忽略，cleanToken 保留数据库中的原值
 		cleanToken.Models = token.Models
 		cleanToken.Subnet = token.Subnet
 	}

@@ -2,7 +2,6 @@ package controller
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -316,7 +315,6 @@ func GetSelf(c *gin.Context) {
 }
 
 func UpdateUser(c *gin.Context) {
-	ctx := c.Request.Context()
 	var updatedUser model.User
 	err := json.NewDecoder(c.Request.Body).Decode(&updatedUser)
 	if err != nil || updatedUser.Id == 0 {
@@ -362,6 +360,8 @@ func UpdateUser(c *gin.Context) {
 	if updatedUser.Password == "$I_LOVE_U" {
 		updatedUser.Password = "" // rollback to what it should be
 	}
+	// 阶段2：额度输入被忽略，旧 quota 列只保留原值（兼容读取，不再更新）
+	updatedUser.Quota = originUser.Quota
 	updatePassword := updatedUser.Password != ""
 	if err := updatedUser.Update(updatePassword); err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -369,9 +369,6 @@ func UpdateUser(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
-	}
-	if originUser.Quota != updatedUser.Quota {
-		model.RecordLog(ctx, originUser.Id, model.LogTypeManage, fmt.Sprintf("管理员将用户额度从 %s修改为 %s", common.LogQuota(originUser.Quota), common.LogQuota(updatedUser.Quota)))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -698,38 +695,11 @@ func EmailBind(c *gin.Context) {
 	return
 }
 
-type adminTopUpRequest struct {
-	UserId int    `json:"user_id"`
-	Quota  int    `json:"quota"`
-	Remark string `json:"remark"`
-}
-
+// AdminTopUp 已停用：系统进入用量观测模式后不再有充值/余额语义。
+// 保留路由以给出明确的 deprecated 响应，而不是静默 404。
 func AdminTopUp(c *gin.Context) {
-	ctx := c.Request.Context()
-	req := adminTopUpRequest{}
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	err = model.IncreaseUserQuota(req.UserId, int64(req.Quota))
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	if req.Remark == "" {
-		req.Remark = fmt.Sprintf("通过 API 充值 %s", common.LogQuota(int64(req.Quota)))
-	}
-	model.RecordTopupLog(ctx, req.UserId, req.Remark, req.Quota)
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
+	c.JSON(http.StatusGone, gin.H{
+		"success": false,
+		"message": "充值功能已停用（deprecated）：本系统不再使用余额与额度结算，请求按用量观测模式直接放行",
 	})
-	return
 }

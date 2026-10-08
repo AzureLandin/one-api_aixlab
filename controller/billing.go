@@ -9,8 +9,10 @@ import (
 )
 
 // https://github.com/songquanpeng/one-api/issues/79
-// 以下是 OpenAI 额度查询接口（/v1/dashboard/billing/*）的响应体，
-// 原先定义在已删除的上游余额爬取代码中，这里仅保留用户侧接口需要的部分。
+// 以下是 OpenAI 额度查询接口（/v1/dashboard/billing/*）的响应体。
+// 阶段2：本系统不再使用额度结算，这两个端点退化为纯协议兼容占位，
+// 用于让 OpenAI 生态客户端正常完成初始化检查；返回值不代表任何真实
+// 计量数据，也不再读取 quota 列。
 
 type OpenAISubscriptionResponse struct {
 	Object             string  `json:"object"`
@@ -27,71 +29,18 @@ type OpenAIUsageResponse struct {
 	TotalUsage float64 `json:"total_usage"` // unit: 0.01 dollar
 }
 
+// GetSubscription 返回固定的“不限额”占位；仅 AccessUntil 仍取令牌有效期
+// （有效期属于权限语义，不是额度，保留）。
 func GetSubscription(c *gin.Context) {
-	var remainQuota int64
-	var usedQuota int64
+	var accessUntil int64
 	var err error
-	var token *model.Token
-	var expiredTime int64
 	if config.DisplayTokenStatEnabled {
 		tokenId := c.GetInt(ctxkey.TokenId)
+		var token *model.Token
 		token, err = model.GetTokenById(tokenId)
-		if err == nil {
-			expiredTime = token.ExpiredTime
-			remainQuota = token.RemainQuota
-			usedQuota = token.UsedQuota
+		if err == nil && token.ExpiredTime > 0 {
+			accessUntil = token.ExpiredTime
 		}
-	} else {
-		userId := c.GetInt(ctxkey.Id)
-		remainQuota, err = model.GetUserQuota(userId)
-		if err != nil {
-			usedQuota, err = model.GetUserUsedQuota(userId)
-		}
-	}
-	if expiredTime <= 0 {
-		expiredTime = 0
-	}
-	if err != nil {
-		Error := relaymodel.Error{
-			Message: err.Error(),
-			Type:    "upstream_error",
-		}
-		c.JSON(200, gin.H{
-			"error": Error,
-		})
-		return
-	}
-	quota := remainQuota + usedQuota
-	amount := float64(quota)
-	if config.DisplayInCurrencyEnabled {
-		amount /= config.QuotaPerUnit
-	}
-	if token != nil && token.UnlimitedQuota {
-		amount = 100000000
-	}
-	subscription := OpenAISubscriptionResponse{
-		Object:             "billing_subscription",
-		HasPaymentMethod:   true,
-		SoftLimitUSD:       amount,
-		HardLimitUSD:       amount,
-		SystemHardLimitUSD: amount,
-		AccessUntil:        expiredTime,
-	}
-	c.JSON(200, subscription)
-	return
-}
-
-func GetUsage(c *gin.Context) {
-	var quota int64
-	var err error
-	var token *model.Token
-	if config.DisplayTokenStatEnabled {
-		tokenId := c.GetInt(ctxkey.TokenId)
-		token, err = model.GetTokenById(tokenId)
-		quota = token.UsedQuota
-	} else {
-		userId := c.GetInt(ctxkey.Id)
-		quota, err = model.GetUserUsedQuota(userId)
 	}
 	if err != nil {
 		Error := relaymodel.Error{
@@ -103,14 +52,24 @@ func GetUsage(c *gin.Context) {
 		})
 		return
 	}
-	amount := float64(quota)
-	if config.DisplayInCurrencyEnabled {
-		amount /= config.QuotaPerUnit
-	}
-	usage := OpenAIUsageResponse{
+	// 占位上限，语义为“无限制”，与任何计量无关
+	const unlimited = 100000000
+	c.JSON(200, OpenAISubscriptionResponse{
+		Object:             "billing_subscription",
+		HasPaymentMethod:   true,
+		SoftLimitUSD:       unlimited,
+		HardLimitUSD:       unlimited,
+		SystemHardLimitUSD: unlimited,
+		AccessUntil:        accessUntil,
+	})
+	return
+}
+
+// GetUsage 返回零占位。真实用量请查询 /api/usage/*（阶段 1 事实层）。
+func GetUsage(c *gin.Context) {
+	c.JSON(200, OpenAIUsageResponse{
 		Object:     "list",
-		TotalUsage: amount * 100,
-	}
-	c.JSON(200, usage)
+		TotalUsage: 0,
+	})
 	return
 }

@@ -14,14 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
@@ -38,7 +35,6 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	channelType := c.GetInt(ctxkey.Channel)
 	channelId := c.GetInt(ctxkey.ChannelId)
 	userId := c.GetInt(ctxkey.Id)
-	group := c.GetString(ctxkey.Group)
 	tokenName := c.GetString(ctxkey.TokenName)
 
 	var ttsRequest openai.TextToSpeechRequest
@@ -56,60 +52,9 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		}
 	}
 
-	modelRatio := billingratio.GetModelRatio(audioModel, channelType)
-	groupRatio := billingratio.GetGroupRatio(group)
-	ratio := modelRatio * groupRatio
-	var quota int64
-	var preConsumedQuota int64
-	switch relayMode {
-	case relaymode.AudioSpeech:
-		preConsumedQuota = int64(float64(len(ttsRequest.Input)) * ratio)
-		quota = preConsumedQuota
-	default:
-		preConsumedQuota = int64(float64(config.PreConsumedQuota) * ratio)
-	}
-	userQuota, err := model.CacheGetUserQuota(ctx, userId)
-	if err != nil {
-		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
-	}
-
-	// Check if user quota is enough
-	if userQuota-preConsumedQuota < 0 {
-		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
-	}
-	err = model.CacheDecreaseUserQuota(userId, preConsumedQuota)
-	if err != nil {
-		return openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
-	}
-	if userQuota > 100*preConsumedQuota {
-		// in this case, we do not pre-consume quota
-		// because the user has enough quota
-		preConsumedQuota = 0
-	}
-	if preConsumedQuota > 0 {
-		err := model.PreConsumeTokenQuota(tokenId, preConsumedQuota)
-		if err != nil {
-			return openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
-		}
-	}
-	succeed := false
-	defer func() {
-		if succeed {
-			return
-		}
-		if preConsumedQuota > 0 {
-			// we need to roll back the pre-consumed quota
-			defer func(ctx context.Context) {
-				go func() {
-					// negative means add quota back for token & user
-					err := model.PostConsumeTokenQuota(tokenId, -preConsumedQuota)
-					if err != nil {
-						logger.Error(ctx, fmt.Sprintf("error rollback pre-consumed quota: %s", err.Error()))
-					}
-				}()
-			}(c.Request.Context())
-		}
-	}()
+	// quota/ratio pre-consume removed (stage 2): only a local token estimate
+	// for transcription output remains, used purely for usage reporting.
+	var textTokens int64
 
 	// map model name
 	modelMapping := c.GetStringMapString(ctxkey.ModelMapping)
@@ -136,7 +81,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	}
 
 	requestBody := &bytes.Buffer{}
-	_, err = io.Copy(requestBody, c.Request.Body)
+	_, err := io.Copy(requestBody, c.Request.Body)
 	if err != nil {
 		return openai.ErrorWrapper(err, "new_request_body_failed", http.StatusInternalServerError)
 	}
@@ -209,18 +154,15 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		if err != nil {
 			return openai.ErrorWrapper(err, "get_text_from_body_err", http.StatusInternalServerError)
 		}
-		quota = int64(openai.CountTokenText(text, audioModel))
+		textTokens = int64(openai.CountTokenText(text, audioModel))
 		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 	}
 	if resp.StatusCode != http.StatusOK {
 		recordAudioUsageError(ctx, audioModel, userId, tokenId, channelId)
 		return RelayErrorHandler(resp)
 	}
-	succeed = true
-	quotaDelta := quota - preConsumedQuota
 	defer func(ctx context.Context) {
-		go recordAudioUsage(ctx, relayMode, audioModel, userId, tokenId, channelId, quota)
-		go billing.PostConsumeQuota(ctx, tokenId, quotaDelta, quota, userId, channelId, modelRatio, groupRatio, audioModel, tokenName)
+		go recordAudioUsage(ctx, relayMode, audioModel, userId, tokenId, channelId, tokenName, textTokens)
 	}(c.Request.Context())
 
 	for k, v := range resp.Header {
@@ -284,12 +226,12 @@ func getTextFromJSON(body []byte) (string, error) {
 	return whisperResponse.Text, nil
 }
 
-// recordAudioUsage persists the audio generation fact.
-// Transcription/translation output text was token-counted locally while
-// computing quota; that number is an estimate, so usage_source stays empty
-// (the recorder defaults it to "estimated"). TTS has no reliable token
-// counts at all and records zeros.
-func recordAudioUsage(ctx context.Context, relayMode int, modelName string, userId, tokenId, channelId int, textTokens int64) {
+// recordAudioUsage persists the audio generation fact and the quota-free
+// legacy consumption log.
+// Transcription/translation output text is token-counted locally; that number
+// is an estimate, so usage_source stays empty (the recorder defaults it to
+// "estimated"). TTS has no reliable token counts and records zeros.
+func recordAudioUsage(ctx context.Context, relayMode int, modelName string, userId, tokenId, channelId int, tokenName string, textTokens int64) {
 	input := usagelog.RecordInput{
 		RequestID: helper.GetRequestID(ctx),
 		UserID:    userId,
@@ -298,13 +240,27 @@ func recordAudioUsage(ctx context.Context, relayMode int, modelName string, user
 		ModelName: modelName,
 		Status:    model.UsageStatusSuccess,
 	}
-	if relayMode != relaymode.AudioSpeech && textTokens > 0 {
-		input.Usage.CompletionTokens = int(textTokens)
-		input.Usage.TotalTokens = int(textTokens)
+	content := "语音合成"
+	if relayMode != relaymode.AudioSpeech {
+		if textTokens > 0 {
+			input.Usage.CompletionTokens = int(textTokens)
+			input.Usage.TotalTokens = int(textTokens)
+		}
+		content = fmt.Sprintf("语音转写，估算输出 %d tokens", textTokens)
 	}
 	if err := usagelog.Default().RecordOnce(ctx, input); err != nil {
 		logger.Errorf(ctx, "audio usage record failed: %s", err.Error())
 	}
+	model.RecordConsumeLog(ctx, &model.Log{
+		UserId:           userId,
+		ChannelId:        channelId,
+		PromptTokens:     input.Usage.PromptTokens,
+		CompletionTokens: input.Usage.CompletionTokens,
+		ModelName:        modelName,
+		TokenName:        tokenName,
+		Quota:            0,
+		Content:          content,
+	})
 }
 
 func recordAudioUsageError(ctx context.Context, modelName string, userId, tokenId, channelId int) {

@@ -14,24 +14,10 @@ import { API, copy, showError, showSuccess } from '../../helpers';
 import { getChannelOption } from '../../helpers/helper';
 import '../Dashboard/Dashboard.css';
 
-const formatPer1k = (quotaPer1k, displayInCurrency, quotaPerUnit) => {
-  if (displayInCurrency) {
-    const amount = (quotaPer1k / quotaPerUnit).toFixed(4);
-    return `$${amount} / 1K`;
-  }
-  const points = Number.isInteger(quotaPer1k)
-    ? quotaPer1k
-    : Math.round(quotaPer1k * 100) / 100;
-  return `${points} / 1K`;
-};
-
 const Plaza = () => {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [group, setGroup] = useState('');
-  const [groupRatio, setGroupRatio] = useState(1);
-  const [displayInCurrency, setDisplayInCurrency] = useState(false);
-  const [quotaPerUnit, setQuotaPerUnit] = useState(500000);
   const [models, setModels] = useState([]);
   const [keyword, setKeyword] = useState('');
   const [expanded, setExpanded] = useState({});
@@ -43,9 +29,6 @@ const Plaza = () => {
       const { success, message, data } = res.data || {};
       if (success && data) {
         setGroup(data.group || '');
-        setGroupRatio(data.group_ratio ?? 1);
-        setDisplayInCurrency(!!data.display_in_currency);
-        setQuotaPerUnit(data.quota_per_unit || 500000);
         setModels(data.models || []);
       } else {
         showError(message || t('plaza.load_failed'));
@@ -104,9 +87,7 @@ const Plaza = () => {
       <Card fluid className='chart-card'>
         <Card.Content>
           <Card.Header className='header'>{t('plaza.title')}</Card.Header>
-          <Message info>
-            {t('plaza.intro', { group, ratio: groupRatio })}
-          </Message>
+          <Message info>{t('plaza.intro', { group })}</Message>
           <Form onSubmit={(e) => e.preventDefault()}>
             <Form.Input
               icon='search'
@@ -125,9 +106,6 @@ const Plaza = () => {
                 <Table.Row>
                   <Table.HeaderCell width={1} />
                   <Table.HeaderCell>{t('plaza.columns.model')}</Table.HeaderCell>
-                  <Table.HeaderCell>{t('plaza.columns.input')}</Table.HeaderCell>
-                  <Table.HeaderCell>{t('plaza.columns.output')}</Table.HeaderCell>
-                  <Table.HeaderCell>{t('plaza.columns.ratio')}</Table.HeaderCell>
                   <Table.HeaderCell>{t('plaza.columns.channels')}</Table.HeaderCell>
                 </Table.Row>
               </Table.Header>
@@ -155,39 +133,12 @@ const Plaza = () => {
                             copyModel(item.name);
                           }}
                         />
-                        {!item.ratio_configured && (
-                          <Label size='tiny' color='orange' style={{ marginLeft: 6 }}>
-                            {t('plaza.unconfigured')}
-                          </Label>
-                        )}
-                        {item.ratio_varies && (
-                          <Label size='tiny' color='yellow' style={{ marginLeft: 6 }}>
-                            {t('plaza.ratio_varies')}
-                          </Label>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {formatPer1k(
-                          item.input_quota_per_1k,
-                          displayInCurrency,
-                          quotaPerUnit
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {formatPer1k(
-                          item.output_quota_per_1k,
-                          displayInCurrency,
-                          quotaPerUnit
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {item.model_ratio} × {item.completion_ratio} × {item.group_ratio}
                       </Table.Cell>
                       <Table.Cell>{(item.channels || []).length}</Table.Cell>
                     </Table.Row>
                     {expanded[item.name] && (
                       <Table.Row>
-                        <Table.Cell colSpan='6'>
+                        <Table.Cell colSpan='3'>
                           <Table compact celled>
                             <Table.Header>
                               <Table.Row>
@@ -203,12 +154,6 @@ const Plaza = () => {
                                 <Table.HeaderCell>
                                   {t('plaza.channel.priority')}
                                 </Table.HeaderCell>
-                                <Table.HeaderCell>
-                                  {t('plaza.columns.input')}
-                                </Table.HeaderCell>
-                                <Table.HeaderCell>
-                                  {t('plaza.columns.output')}
-                                </Table.HeaderCell>
                               </Table.Row>
                             </Table.Header>
                             <Table.Body>
@@ -222,20 +167,6 @@ const Plaza = () => {
                                     </Label>
                                   </Table.Cell>
                                   <Table.Cell>{ch.priority}</Table.Cell>
-                                  <Table.Cell>
-                                    {formatPer1k(
-                                      ch.input_quota_per_1k,
-                                      displayInCurrency,
-                                      quotaPerUnit
-                                    )}
-                                  </Table.Cell>
-                                  <Table.Cell>
-                                    {formatPer1k(
-                                      ch.output_quota_per_1k,
-                                      displayInCurrency,
-                                      quotaPerUnit
-                                    )}
-                                  </Table.Cell>
                                 </Table.Row>
                               ))}
                             </Table.Body>

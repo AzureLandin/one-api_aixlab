@@ -85,6 +85,7 @@ func fetchAndUpdateUserQuota(ctx context.Context, id int) (quota int64, err erro
 	return
 }
 
+// LEGACY(阶段2)：额度缓存仅服务于旧展示路径；relay 请求链路已不再读写额度。
 func CacheGetUserQuota(ctx context.Context, id int) (quota int64, err error) {
 	if !common.RedisEnabled {
 		return GetUserQuota(id)
@@ -104,6 +105,7 @@ func CacheGetUserQuota(ctx context.Context, id int) (quota int64, err error) {
 	return quota, nil
 }
 
+// LEGACY(阶段2)：额度缓存仅服务于旧展示路径；relay 请求链路已不再读写额度。
 func CacheUpdateUserQuota(ctx context.Context, id int) error {
 	if !common.RedisEnabled {
 		return nil
@@ -116,6 +118,7 @@ func CacheUpdateUserQuota(ctx context.Context, id int) error {
 	return err
 }
 
+// LEGACY(阶段2)：额度缓存仅服务于旧展示路径；relay 请求链路已不再读写额度。
 func CacheDecreaseUserQuota(id int, quota int64) error {
 	if !common.RedisEnabled {
 		return nil

@@ -12,4 +12,15 @@ cmd.md
 .env
 /one-api
 temp
-.DS_Store.gocache/
+.DS_Store
+.gocache/
+
+# 阶段验收冒烟生成物（脚本本身入库）
+/smoke/
+/scripts/smoke/one-api
+/scripts/smoke/one-api.db
+/scripts/smoke/tiktoken/
+/scripts/smoke/*.log
+/scripts/smoke/smoke.out
+/scripts/smoke/jar_*.txt
+/scripts/smoke/tmp_*.json

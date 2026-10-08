@@ -184,6 +184,7 @@ func UpdateChannelStatusById(id int, status int) {
 	}
 }
 
+// LEGACY(阶段2)：渠道 used_quota 不再被新请求写入，保留供旧管理页面读取。
 func UpdateChannelUsedQuota(id int, quota int64) {
 	if config.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeChannelUsedQuota, id, quota)
