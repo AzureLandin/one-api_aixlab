@@ -3,12 +3,12 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
+	"github.com/songquanpeng/one-api/relay/upstream"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -170,7 +170,15 @@ func CacheGetGroupModels(ctx context.Context, group string) ([]string, error) {
 	return models, nil
 }
 
-var group2model2channels map[string]map[string][]*Channel
+// ChannelEntry pairs a cached channel with the upstream protocol it speaks.
+// Resolving the protocol once at sync time keeps channel selection from
+// re-parsing the channel config on every request.
+type ChannelEntry struct {
+	Channel  *Channel
+	Protocol upstream.Protocol
+}
+
+var group2model2channels map[string]map[string][]*ChannelEntry
 var channelSyncLock sync.RWMutex
 
 func InitChannelCache() {
@@ -186,30 +194,29 @@ func InitChannelCache() {
 	for _, ability := range abilities {
 		groups[ability.Group] = true
 	}
-	newGroup2model2channels := make(map[string]map[string][]*Channel)
+	newGroup2model2channels := make(map[string]map[string][]*ChannelEntry)
 	for group := range groups {
-		newGroup2model2channels[group] = make(map[string][]*Channel)
+		newGroup2model2channels[group] = make(map[string][]*ChannelEntry)
 	}
 	for _, channel := range channels {
-		groups := strings.Split(channel.Group, ",")
-		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
-			for _, model := range models {
+		entry := &ChannelEntry{Channel: channel, Protocol: channel.UpstreamProtocol()}
+		for _, group := range strings.Split(channel.Group, ",") {
+			for _, model := range strings.Split(channel.Models, ",") {
 				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]*Channel, 0)
+					newGroup2model2channels[group][model] = make([]*ChannelEntry, 0)
 				}
-				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel)
+				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], entry)
 			}
 		}
 	}
 
 	// sort by priority
 	for group, model2channels := range newGroup2model2channels {
-		for model, channels := range model2channels {
-			sort.Slice(channels, func(i, j int) bool {
-				return channels[i].GetPriority() > channels[j].GetPriority()
+		for model, entries := range model2channels {
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Channel.GetPriority() > entries[j].Channel.GetPriority()
 			})
-			newGroup2model2channels[group][model] = channels
+			newGroup2model2channels[group][model] = entries
 		}
 	}
 
@@ -227,22 +234,39 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
+// CacheGetRandomSatisfiedChannel picks a channel for the group and model,
+// reading the in-memory cache when it is enabled and the database otherwise.
+//
+// Channels that cannot serve the client's protocol are dropped before the
+// priority tier is computed, so the tier is chosen among channels that are
+// actually usable and a mixed-protocol group never selects a channel that would
+// reject the request. upstream.Unsupported as the client protocol does not
+// constrain selection (see channelServesClient).
+func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool, client upstream.Protocol) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
-		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority)
+		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority, client)
 	}
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
-	channels := group2model2channels[group][model]
-	if len(channels) == 0 {
-		return nil, errors.New("channel not found")
+	entries := group2model2channels[group][model]
+	if len(entries) == 0 {
+		return nil, ErrChannelNotFound
 	}
-	endIdx := len(channels)
+	eligible := make([]*ChannelEntry, 0, len(entries))
+	for _, entry := range entries {
+		if channelServesClient(client, entry.Protocol) {
+			eligible = append(eligible, entry)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil, ErrNoChannelForProtocol
+	}
+	endIdx := len(eligible)
 	// choose by priority
-	firstChannel := channels[0]
+	firstChannel := eligible[0].Channel
 	if firstChannel.GetPriority() > 0 {
-		for i := range channels {
-			if channels[i].GetPriority() != firstChannel.GetPriority() {
+		for i := range eligible {
+			if eligible[i].Channel.GetPriority() != firstChannel.GetPriority() {
 				endIdx = i
 				break
 			}
@@ -250,9 +274,9 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 	}
 	idx := rand.Intn(endIdx)
 	if ignoreFirstPriority {
-		if endIdx < len(channels) { // which means there are more than one priority
-			idx = random.RandRange(endIdx, len(channels))
+		if endIdx < len(eligible) { // which means there are more than one priority
+			idx = random.RandRange(endIdx, len(eligible))
 		}
 	}
-	return channels[idx], nil
+	return eligible[idx].Channel, nil
 }

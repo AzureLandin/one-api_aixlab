@@ -83,14 +83,27 @@ func TestCanServeCoversEveryTranslatedPair(t *testing.T) {
 	}
 }
 
-func TestCanServeRefusesUntranslatedUpstreamAndUnknownClient(t *testing.T) {
-	if CanServe(OpenAIResponses, Unsupported) {
-		t.Error("CanServe(OpenAIResponses, Unsupported) = true, want false")
+// An untranslated family still serves the chat path through its own adaptor.
+// Excluding it there would take every Gemini/Baidu/PaLM channel out of service
+// on /v1/chat/completions — the endpoint they work on today.
+func TestCanServeUntranslatedUpstreamServesChatOnly(t *testing.T) {
+	if !CanServe(OpenAIChat, Unsupported) {
+		t.Error("CanServe(OpenAIChat, Unsupported) = false, want true")
 	}
+	for _, client := range []Protocol{OpenAIResponses, AnthropicMessages} {
+		if CanServe(client, Unsupported) {
+			t.Errorf("CanServe(%q, Unsupported) = true, want false", client)
+		}
+	}
+}
+
+func TestCanServeRefusesUnknownClientProtocol(t *testing.T) {
 	// An upstream claims nothing about a client protocol that is not one of the
 	// three entry points.
-	if CanServe(Unsupported, OpenAIChat) {
-		t.Error("CanServe(Unsupported, OpenAIChat) = true, want false")
+	for _, up := range []Protocol{OpenAIChat, OpenAIResponses, AnthropicMessages, Compatible, Unsupported} {
+		if CanServe(Unsupported, up) {
+			t.Errorf("CanServe(Unsupported, %q) = true, want false", up)
+		}
 	}
 }
 

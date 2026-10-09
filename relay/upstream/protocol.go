@@ -72,10 +72,10 @@ func Valid(name string) bool {
 
 // canServeMatrix lists, per upstream protocol, the client protocols it can
 // serve. Every translated family can serve every client protocol — directly
-// when the two match, by translation otherwise — so every cell is currently
-// true. It is written out rather than collapsed so that a family with narrower
-// support can be added without touching the callers. A lookup for an unknown
-// upstream protocol (Unsupported) misses the map and yields false.
+// when the two match, by translation otherwise — so every cell of those rows is
+// true. It is written out rather than collapsed so that a narrower family can
+// be added without touching the callers, and so that the Unsupported row is a
+// decision rather than an accidental map miss.
 var canServeMatrix = map[Protocol]map[Protocol]bool{
 	OpenAIChat: {
 		OpenAIChat: true, OpenAIResponses: true, AnthropicMessages: true,
@@ -88,6 +88,13 @@ var canServeMatrix = map[Protocol]map[Protocol]bool{
 	},
 	Compatible: {
 		OpenAIChat: true, OpenAIResponses: true, AnthropicMessages: true,
+	},
+	// A family this gateway does not translate keeps serving
+	// /v1/chat/completions through its own adaptor, and only that: the two
+	// protocol entry points that need the body rewritten are out of reach, and
+	// are refused with a named error rather than guessed at.
+	Unsupported: {
+		OpenAIChat: true,
 	},
 }
 

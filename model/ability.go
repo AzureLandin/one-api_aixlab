@@ -2,15 +2,41 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
 	"strings"
 
-	"gorm.io/gorm"
-
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/utils"
+	"github.com/songquanpeng/one-api/relay/upstream"
 )
+
+// Channel selection errors. Callers tell them apart so that "this group has no
+// such model" and "this group has channels, but none of them can serve the
+// protocol this endpoint speaks" do not collapse into one misleading message.
+var (
+	// ErrChannelNotFound means no enabled channel serves the group and model.
+	ErrChannelNotFound = errors.New("channel not found")
+	// ErrNoChannelForProtocol means channels exist for the group and model, but
+	// none speaks an upstream protocol that can serve the client's.
+	ErrNoChannelForProtocol = errors.New("no channel can serve the client protocol")
+)
+
+// channelServesClient reports whether a channel speaking proto may be selected
+// for a request made with the client protocol client.
+//
+// upstream.Unsupported as the client protocol constrains nothing: relay modes
+// outside the three protocol entry points (embeddings, audio, images, legacy
+// completions) reach their adaptor through the chat path, which every upstream
+// family serves.
+func channelServesClient(client, proto upstream.Protocol) bool {
+	if client == upstream.Unsupported {
+		return true
+	}
+	return upstream.CanServe(client, proto)
+}
 
 type Ability struct {
 	Group     string `json:"group" gorm:"type:varchar(32);primaryKey;autoIncrement:false"`
@@ -20,8 +46,15 @@ type Ability struct {
 	Priority  *int64 `json:"priority" gorm:"bigint;default:0;index"`
 }
 
-func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
-	ability := Ability{}
+// GetRandomSatisfiedChannel picks a channel for the group and model from the
+// database (the path taken when the channel cache is off).
+//
+// Every candidate is loaded rather than one random row, because the protocol a
+// channel speaks lives in its config, which SQL cannot evaluate: eligibility is
+// decided here and the random pick happens among the survivors. A group that
+// mixes upstream protocols therefore never hands the request to a channel that
+// would reject it.
+func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool, client upstream.Protocol) (*Channel, error) {
 	groupCol := "`group`"
 	trueVal := "1"
 	if common.UsingPostgreSQL {
@@ -29,26 +62,40 @@ func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority b
 		trueVal = "true"
 	}
 
-	var err error = nil
-	var channelQuery *gorm.DB
-	if ignoreFirstPriority {
-		channelQuery = DB.Where(groupCol+" = ? and model = ? and enabled = "+trueVal, group, model)
-	} else {
+	abilityQuery := DB.Where(groupCol+" = ? and model = ? and enabled = "+trueVal, group, model)
+	if !ignoreFirstPriority {
 		maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(groupCol+" = ? and model = ? and enabled = "+trueVal, group, model)
-		channelQuery = DB.Where(groupCol+" = ? and model = ? and enabled = "+trueVal+" and priority = (?)", group, model, maxPrioritySubQuery)
+		abilityQuery = abilityQuery.Where("priority = (?)", maxPrioritySubQuery)
 	}
-	if common.UsingSQLite || common.UsingPostgreSQL {
-		err = channelQuery.Order("RANDOM()").First(&ability).Error
-	} else {
-		err = channelQuery.Order("RAND()").First(&ability).Error
-	}
-	if err != nil {
+	var abilities []Ability
+	if err := abilityQuery.Find(&abilities).Error; err != nil {
 		return nil, err
 	}
-	channel := Channel{}
-	channel.Id = ability.ChannelId
-	err = DB.First(&channel, "id = ?", ability.ChannelId).Error
-	return &channel, err
+	if len(abilities) == 0 {
+		return nil, ErrChannelNotFound
+	}
+	channelIds := make([]int, 0, len(abilities))
+	for _, ability := range abilities {
+		channelIds = append(channelIds, ability.ChannelId)
+	}
+	var channels []*Channel
+	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	if len(channels) == 0 {
+		// Abilities left behind by deleted channels: there is nothing to serve.
+		return nil, ErrChannelNotFound
+	}
+	eligible := make([]*Channel, 0, len(channels))
+	for _, channel := range channels {
+		if channelServesClient(client, channel.UpstreamProtocol()) {
+			eligible = append(eligible, channel)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil, ErrNoChannelForProtocol
+	}
+	return eligible[rand.Intn(len(eligible))], nil
 }
 
 func (channel *Channel) AddAbilities() error {

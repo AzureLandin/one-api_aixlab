@@ -8,6 +8,8 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/relay/channeltype"
+	"github.com/songquanpeng/one-api/relay/upstream"
 	"gorm.io/gorm"
 )
 
@@ -242,6 +244,23 @@ func (channel *Channel) LoadConfig() (ChannelConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// UpstreamProtocol reports the wire protocol this channel's upstream speaks:
+// the one its config names explicitly, otherwise the one implied by the channel
+// type. Channel selection uses it to keep a channel that cannot serve the
+// client's protocol out of the candidate set.
+//
+// A config that cannot be parsed resolves to upstream.Unsupported: such a
+// channel still works on /v1/chat/completions (every adaptor is reachable from
+// there) and is never selected for a protocol entry point it might not serve.
+func (channel *Channel) UpstreamProtocol() upstream.Protocol {
+	cfg, err := channel.LoadConfig()
+	if err != nil {
+		logger.SysError(fmt.Sprintf("failed to load config for channel %d, error: %s", channel.Id, err.Error()))
+		return upstream.Unsupported
+	}
+	return upstream.Resolve(cfg.UpstreamProtocol, channeltype.ToAPIType(channel.Type))
 }
 
 func UpdateChannelStatusById(id int, status int) {

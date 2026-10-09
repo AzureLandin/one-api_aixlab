@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
+	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
 type ModelRequest struct {
@@ -42,11 +45,18 @@ func Distribute() func(c *gin.Context) {
 			}
 		} else {
 			requestModel = c.GetString(ctxkey.RequestModel)
+			// Only channels that can serve the protocol this endpoint speaks
+			// are candidates. A relay mode outside the three protocol entry
+			// points maps to upstream.Unsupported, which constrains nothing
+			// (see model.channelServesClient).
+			clientProtocol := upstream.ClientProtocolFor(relaymode.GetByPath(c.Request.URL.Path))
 			var err error
-			channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, false)
+			channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, false, clientProtocol)
 			if err != nil {
 				message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-				if channel != nil {
+				if errors.Is(err, model.ErrNoChannelForProtocol) {
+					message = fmt.Sprintf("当前分组 %s 下模型 %s 的渠道均不支持 %s 客户端协议", userGroup, requestModel, clientProtocol)
+				} else if channel != nil {
 					logger.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
 					message = "数据库一致性已被破坏，请联系管理员"
 				}

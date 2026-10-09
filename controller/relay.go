@@ -19,6 +19,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/controller"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
 // https://platform.openai.com/docs/api-reference/chat
@@ -72,7 +73,10 @@ func Relay(c *gin.Context) {
 		retryTimes = 0
 	}
 	for i := retryTimes; i > 0; i-- {
-		channel, err := dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes)
+		// The retry carries the same protocol constraint as the first attempt:
+		// a channel that cannot serve this client protocol must not be picked
+		// just because the first one failed.
+		channel, err := dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes, upstream.ClientProtocolFor(relayMode))
 		if err != nil {
 			logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
 			break
