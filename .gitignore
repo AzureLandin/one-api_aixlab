@@ -21,6 +21,9 @@ temp
 web/npm_install*.log
 web/build.log
 
+# 本地代码索引（CodeGraph），不入库
+.codegraph/
+
 # 阶段验收冒烟生成物（脚本本身入库）
 /smoke/
 /scripts/smoke/one-api
@@ -32,6 +35,7 @@ web/build.log
 /scripts/smoke/tmp_*.json
 /scripts/smoke/tmp_*.txt
 /scripts/smoke/tmp_*.h
+/scripts/smoke/mock_last_request.json
 /scripts/smoke/matrix_*.dump
 /scripts/smoke/matrix_*.db
 /scripts/smoke/oneapi_matrix.log

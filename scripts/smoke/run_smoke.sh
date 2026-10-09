@@ -9,7 +9,10 @@ cd "$HERE"
 rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_login.json tmp_user.json tmp_l2.json tmp_tk.json tmp_ch.json tmp_relay.json tmp_topup.json \
       tmp_resp.json tmp_resp2.json tmp_resp3.json tmp_resp4.json tmp_msg.json tmp_msg2.json \
-      tmp_cache.json tmp_sum.json tmp_models.json tmp_model1.json
+      tmp_cache.json tmp_sum.json tmp_models.json tmp_model1.json \
+      tmp_resp_sse.h tmp_resp_sse.txt tmp_msg_sse.h tmp_msg_sse.txt mock_last_request.json \
+      tmp_tool_chat.json tmp_tool_chat_sse.txt tmp_tool_resp.json tmp_tool_resp_sse.txt \
+      tmp_tool_msg.json tmp_tool_msg_sse.txt tmp_tool_turn.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -126,10 +129,12 @@ CODE=$(curl -s -o tmp_resp2.json -w '%{http_code}' -X POST http://127.0.0.1:1300
 check "responses reject previous_response_id" 400 "$CODE"
 grep -q 'previous_response_id' tmp_resp2.json \
   && { echo "PASS: rejection names param"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_resp2.json)"; fail=$((fail+1)); }
+# store=true 不再拒绝：上游不落库，忽略即可（见 relay/protocol/responses_test.go
+# TestParseResponses_StoreTrueIsIgnored）。该请求会照常成功并落一行 usage。
 CODE=$(curl -s -o tmp_resp3.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"model":"gpt-3.5-turbo","input":"hi","store":true}')
-check "responses reject store=true" 400 "$CODE"
+check "responses ignore store=true" 200 "$CODE"
 
 # 13b. /v1/responses 流式：typed SSE 事件（阶段 4 §7），不再是 400
 curl -s -N -D tmp_resp_sse.h -o tmp_resp_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
@@ -191,28 +196,193 @@ CR=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_inp
 check "cached_tokens→reported cache_read=3" "reported|3|reported" "$CR"
 
 # 17. 三种协议入口的成功生成都应落 usage_records
-#     chat(2: 基础 + usecache) + responses 非流式(1) + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 6
+#     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
+#     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 6 ] && { echo "PASS: usage_records 6 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 7 ] && { echo "PASS: usage_records 7 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 6 ] && { echo "PASS: all 6 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 7 ] && { echo "PASS: all 7 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 5 ] && { echo "PASS: 5 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+[ "$NR" = 6 ] && { echo "PASS: 6 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
 # 20. §8.1 上报缓存的行恰好 1 条且计入 cache_read，写入为 0（未上报→NULL）
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
 [ "$RCC" = 1 ] && { echo "PASS: exactly 1 reported-cache row"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate 仅统计 reported 记录 = 3/7；coverage = 1/6
+# 21. 管理端聚合三指标：cache_hit_rate 仅统计 reported 记录 = 3/7；coverage = 1/7
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
 ok=(abs(d['cache_hit_rate']-3/7)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-1/6)<1e-9 and d['cache_read_input_tokens']==3
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==5)
+    and abs(d['cache_coverage']-1/7)<1e-9 and d['cache_read_input_tokens']==3
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==6)
+sys.exit(0 if ok else 1)
+PY
+
+# 22. 工具调用贯通：三种对外格式都必须把上游的 tool_calls 完整还原
+#     mock 在请求带 tools 时返回两个并行工具调用（参数分片交错），
+#     这正是"模型无法正常调用工具"的复现形态。
+CHAT_TOOLS='[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}},{"type":"function","function":{"name":"get_time","description":"time","parameters":{"type":"object"}}}]'
+RESP_TOOLS='[{"type":"function","name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"type":"function","name":"get_time","description":"time","parameters":{"type":"object"}}]'
+MSG_TOOLS='[{"name":"get_weather","description":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"name":"get_time","description":"time","input_schema":{"type":"object"}}]'
+
+# 22a. /v1/chat/completions 非流式
+CODE=$(curl -s -o tmp_tool_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"weather?"}],"tools":'"$CHAT_TOOLS"'}')
+check "chat tools 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: chat tool_calls envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_tool_chat.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_tool_chat.json'))
+c=d['choices'][0]
+tc=c['message'].get('tool_calls') or []
+ok=(c['finish_reason']=='tool_calls' and len(tc)==2
+    and [t['function']['name'] for t in tc]==['get_weather','get_time']
+    and [t['id'] for t in tc]==['call_mock_a','call_mock_b']
+    and json.loads(tc[0]['function']['arguments'])=={'city':'SF'}
+    and json.loads(tc[1]['function']['arguments'])=={'tz':'UTC'})
+sys.exit(0 if ok else 1)
+PY
+
+# 22b. /v1/chat/completions 流式（分片必须按 index 归属到各自的调用）
+curl -s -N -o tmp_tool_chat_sse.txt -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","stream":true,"messages":[{"role":"user","content":"weather?"}],"tools":'"$CHAT_TOOLS"'}'
+python3 - <<'PY' && { echo "PASS: chat stream tool_calls by index"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 500 tmp_tool_chat_sse.txt)"; fail=$((fail+1)); }
+import json,sys
+calls={}; finish=[]
+for line in open('tmp_tool_chat_sse.txt'):
+    if not line.startswith('data: ') or '[DONE]' in line: continue
+    try: ch=json.loads(line[6:])
+    except Exception: continue
+    for c in ch.get('choices') or []:
+        if c.get('finish_reason'): finish.append(c['finish_reason'])
+        for tc in (c.get('delta') or {}).get('tool_calls') or []:
+            s=calls.setdefault(tc['index'],{'id':'','name':'','args':''})
+            if tc.get('id'): s['id']=tc['id']
+            f=tc.get('function') or {}
+            if f.get('name'): s['name']=f['name']
+            s['args']+=f.get('arguments') or ''
+ok=(sorted(calls)==[0,1]
+    and calls[0]['id']=='call_mock_a' and calls[0]['name']=='get_weather'
+    and json.loads(calls[0]['args'])=={'city':'SF'}
+    and calls[1]['id']=='call_mock_b' and calls[1]['name']=='get_time'
+    and json.loads(calls[1]['args'])=={'tz':'UTC'}
+    and finish==['tool_calls'])
+sys.exit(0 if ok else 1)
+PY
+grep -q '"finish_reason":""' tmp_tool_chat_sse.txt \
+  && { echo "FAIL: empty finish_reason on a non-terminal chunk"; fail=$((fail+1)); } \
+  || { echo "PASS: no empty finish_reason sentinel"; pass=$((pass+1)); }
+
+# 22c. /v1/responses 非流式：输出必须是 function_call 项，而不是被丢掉
+CODE=$(curl -s -o tmp_tool_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"weather?","tools":'"$RESP_TOOLS"'}')
+check "responses tools 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: responses function_call output"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_tool_resp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_tool_resp.json'))
+items=[i for i in d.get('output',[]) if i.get('type')=='function_call']
+ok=(len(items)==2 and [i['name'] for i in items]==['get_weather','get_time']
+    and [i['call_id'] for i in items]==['call_mock_a','call_mock_b']
+    and json.loads(items[0]['arguments'])=={'city':'SF'})
+sys.exit(0 if ok else 1)
+PY
+
+# 22d. /v1/responses 流式：response.completed 必须自带完整 output（客户端据此取函数调用）
+curl -s -N -o tmp_tool_resp_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"weather?","stream":true,"tools":'"$RESP_TOOLS"'}'
+python3 - <<'PY' && { echo "PASS: responses stream function_call events + completed output"; pass=$((pass+1)); } || { echo "FAIL: $(tail -c 600 tmp_tool_resp_sse.txt)"; fail=$((fail+1)); }
+import json,sys
+events={}
+for line in open('tmp_tool_resp_sse.txt'):
+    if not line.startswith('data: '): continue
+    try: ev=json.loads(line[6:])
+    except Exception: continue
+    events.setdefault(ev.get('type'),[]).append(ev)
+added=[e['item'] for e in events.get('response.output_item.added',[]) if e['item'].get('type')=='function_call']
+argdeltas=events.get('response.function_call_arguments.delta',[])
+deltas=events.get('response.function_call_arguments.done',[])
+completed=events.get('response.completed',[])
+final=[i for i in (completed[-1]['response'].get('output') if completed else []) if i.get('type')=='function_call']
+ok=(len(added)==2 and [i['name'] for i in added]==['get_weather','get_time']
+    and all('output_index' in e for e in argdeltas)
+    and all(e.get('call_id') is None for e in argdeltas)
+    and len(deltas)==2 and len(final)==2
+    and json.loads(final[0]['arguments'])=={'city':'SF'}
+    and json.loads(final[1]['arguments'])=={'tz':'UTC'}
+    and [i['status'] for i in final]==['completed','completed'])
+sys.exit(0 if ok else 1)
+PY
+
+# 22e. /v1/messages 非流式
+CODE=$(curl -s -o tmp_tool_msg.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"messages":[{"role":"user","content":"weather?"}],"tools":'"$MSG_TOOLS"'}')
+check "messages tools 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: messages tool_use blocks + stop_reason"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_tool_msg.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_tool_msg.json'))
+uses=[b for b in d['content'] if b.get('type')=='tool_use']
+ok=(d['stop_reason']=='tool_use' and len(uses)==2
+    and [u['name'] for u in uses]==['get_weather','get_time']
+    and [u['id'] for u in uses]==['call_mock_a','call_mock_b']
+    and uses[0]['input']=={'city':'SF'} and uses[1]['input']=={'tz':'UTC'})
+sys.exit(0 if ok else 1)
+PY
+
+# 22f. /v1/messages 流式：tool_use 块必须有 id/name 且参数按块归属
+curl -s -N -o tmp_tool_msg_sse.txt -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"weather?"}],"tools":'"$MSG_TOOLS"'}'
+python3 - <<'PY' && { echo "PASS: messages stream tool_use blocks"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 600 tmp_tool_msg_sse.txt)"; fail=$((fail+1)); }
+import json,sys
+starts={}; args={}; stops=set(); stop_reason=None
+for line in open('tmp_tool_msg_sse.txt'):
+    if not line.startswith('data: '): continue
+    try: ev=json.loads(line[6:])
+    except Exception: continue
+    t=ev.get('type')
+    if t=='content_block_start' and ev['content_block'].get('type')=='tool_use':
+        starts[ev['index']]=ev['content_block']
+    elif t=='content_block_delta' and ev['delta'].get('type')=='input_json_delta':
+        args[ev['index']]=args.get(ev['index'],'')+ev['delta']['partial_json']
+    elif t=='content_block_stop':
+        stops.add(ev['index'])
+    elif t=='message_delta':
+        stop_reason=(ev.get('delta') or {}).get('stop_reason')
+ok=(len(starts)==2 and stop_reason=='tool_use'
+    and [b['name'] for b in starts.values()]==['get_weather','get_time']
+    and all(b['id'].startswith('call_mock_') for b in starts.values())
+    and json.loads(args[0])=={'city':'SF'} and json.loads(args[1])=={'tz':'UTC'}
+    and set(starts)<=stops)
+sys.exit(0 if ok else 1)
+PY
+
+# 22g. 多轮工具对话：assistant 的 text+tool_use 必须合成同一条消息，tool_result 必须带 name
+curl -s -o tmp_tool_turn.json -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"tools":'"$MSG_TOOLS"',"messages":[
+        {"role":"user","content":"weather?"},
+        {"role":"assistant","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"call_mock_a","name":"get_weather","input":{"city":"SF"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_mock_a","content":"sunny"}]}]}'
+python3 - <<'PY' && { echo "PASS: multi-turn tool conversation upstream shape"; pass=$((pass+1)); } || { echo "FAIL: $(python3 -c "import json;print(json.dumps(json.load(open('mock_last_request.json')).get('messages'),ensure_ascii=False))" 2>/dev/null | head -c 400)"; fail=$((fail+1)); }
+import json,sys
+msgs=json.load(open('mock_last_request.json'))['messages']
+# system? no. Expect exactly: user, assistant(text+tool_calls), tool, assistant(reply)
+assistant=[m for m in msgs if m.get('role')=='assistant' and m.get('tool_calls')]
+tools=[m for m in msgs if m.get('role')=='tool']
+ok=(len(assistant)==1 and assistant[0].get('content')=='checking'
+    and len(assistant[0]['tool_calls'])==1
+    and assistant[0]['tool_calls'][0]['function']['name']=='get_weather'
+    and len(tools)==1 and tools[0].get('tool_call_id')=='call_mock_a'
+    and tools[0].get('name')=='get_weather'
+    and tools[0].get('content')=='sunny')
 sys.exit(0 if ok else 1)
 PY
 
