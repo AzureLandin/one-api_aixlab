@@ -15,6 +15,9 @@ temp
 .DS_Store
 .gocache/
 .npmcache/
+.gopath/
+.dockercfg/
+/one-api-linux-amd64
 web/npm_install*.log
 web/build.log
 
