@@ -24,21 +24,37 @@ type Content struct {
 	ToolUseId string `json:"tool_use_id,omitempty"`
 }
 
+// ToolChoice is the Anthropic tool_choice object. DisableParallelToolUse is
+// carried so an OpenAI `parallel_tool_calls: false` survives the conversion —
+// dropping it let the upstream return parallel tool calls the client had
+// explicitly refused.
+type ToolChoice struct {
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
+}
+
 type Message struct {
 	Role    string    `json:"role"`
 	Content []Content `json:"content"`
 }
 
 type Tool struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description,omitempty"`
-	InputSchema InputSchema `json:"input_schema"`
-}
-
-type InputSchema struct {
-	Type       string `json:"type"`
-	Properties any    `json:"properties,omitempty"`
-	Required   any    `json:"required,omitempty"`
+	Name string `json:"name"`
+	// Description may legitimately be empty; Anthropic accepts the field absent.
+	Description string `json:"description,omitempty"`
+	// InputSchema is the client's JSON Schema passed through verbatim. It is
+	// `any` rather than a struct with type/properties/required because a schema
+	// is open-ended ($schema, additionalProperties, anyOf, definitions, …) and
+	// re-shaping it into three fields both dropped the rest and panicked on the
+	// unchecked `type` assertion.
+	InputSchema any `json:"input_schema"`
+	// CacheControl lets a client mark the tool definition as cacheable; it must
+	// survive the conversion or prompt caching silently stops applying.
+	CacheControl any `json:"cache_control,omitempty"`
+	// Strict asks Anthropic to validate the generated arguments against the
+	// schema instead of treating it as a best-effort hint.
+	Strict *bool `json:"strict,omitempty"`
 }
 
 type Request struct {

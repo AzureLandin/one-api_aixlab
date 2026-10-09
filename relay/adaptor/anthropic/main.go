@@ -7,6 +7,7 @@ import (
 	"github.com/songquanpeng/one-api/common/render"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -31,6 +32,12 @@ func stopReasonClaude2OpenAI(reason *string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "pause_turn":
+		// Claude's resumable server-side loop has no OpenAI equivalent; the
+		// Responses protocol reports it as an incomplete turn, not a clean stop.
+		return "length"
+	case "refusal":
+		return "content_filter"
 	default:
 		return *reason
 	}
@@ -40,17 +47,23 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 	claudeTools := make([]Tool, 0, len(textRequest.Tools))
 
 	for _, tool := range textRequest.Tools {
-		if params, ok := tool.Function.Parameters.(map[string]any); ok {
-			claudeTools = append(claudeTools, Tool{
-				Name:        tool.Function.Name,
-				Description: tool.Function.Description,
-				InputSchema: InputSchema{
-					Type:       params["type"].(string),
-					Properties: params["properties"],
-					Required:   params["required"],
-				},
-			})
+		if tool.Function.Name == "" {
+			// An unnamed function tool cannot be called by name and Anthropic
+			// rejects the definition outright.
+			continue
 		}
+		params := tool.Function.Parameters
+		if params == nil {
+			// Anthropic requires input_schema; an object schema is the only
+			// safe default when the client declared none.
+			params = map[string]any{"type": "object"}
+		}
+		claudeTools = append(claudeTools, Tool{
+			Name:        tool.Function.Name,
+			Description: tool.Function.Description,
+			InputSchema: params,
+			Strict:      tool.Function.Strict,
+		})
 	}
 
 	claudeRequest := Request{
@@ -61,23 +74,12 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 		TopK:        textRequest.TopK,
 		Stream:      textRequest.Stream,
 		Tools:       claudeTools,
+		// OpenAI `stop` maps onto Anthropic stop_sequences. Without this the
+		// client's stop sequences were silently dropped for Claude upstreams.
+		StopSequences: stopSequencesOf(textRequest),
 	}
 	if len(claudeTools) > 0 {
-		claudeToolChoice := struct {
-			Type string `json:"type"`
-			Name string `json:"name,omitempty"`
-		}{Type: "auto"} // default value https://docs.anthropic.com/en/docs/build-with-claude/tool-use#controlling-claudes-output
-		if choice, ok := textRequest.ToolChoice.(map[string]any); ok {
-			if function, ok := choice["function"].(map[string]any); ok {
-				claudeToolChoice.Type = "tool"
-				claudeToolChoice.Name = function["name"].(string)
-			}
-		} else if toolChoiceType, ok := textRequest.ToolChoice.(string); ok {
-			if toolChoiceType == "any" {
-				claudeToolChoice.Type = toolChoiceType
-			}
-		}
-		claudeRequest.ToolChoice = claudeToolChoice
+		claudeRequest.ToolChoice = claudeToolChoice(textRequest, claudeTools)
 	}
 	if claudeRequest.MaxTokens == 0 {
 		claudeRequest.MaxTokens = 4096
@@ -89,64 +91,270 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 		claudeRequest.Model = "claude-2.1"
 	}
 	for _, message := range textRequest.Messages {
-		if message.Role == "system" && claudeRequest.System == "" {
-			claudeRequest.System = message.StringContent()
-			continue
-		}
-		claudeMessage := Message{
-			Role: message.Role,
-		}
-		var content Content
-		if message.IsStringContent() {
-			content.Type = "text"
-			content.Text = message.StringContent()
-			if message.Role == "tool" {
-				claudeMessage.Role = "user"
-				content.Type = "tool_result"
-				content.Content = content.Text
-				content.Text = ""
-				content.ToolUseId = message.ToolCallId
-			}
-			claudeMessage.Content = append(claudeMessage.Content, content)
-			for i := range message.ToolCalls {
-				inputParam := make(map[string]any)
-				_ = json.Unmarshal([]byte(message.ToolCalls[i].Function.Arguments.(string)), &inputParam)
-				claudeMessage.Content = append(claudeMessage.Content, Content{
-					Type:  "tool_use",
-					Id:    message.ToolCalls[i].Id,
-					Name:  message.ToolCalls[i].Function.Name,
-					Input: inputParam,
-				})
-			}
-			claudeRequest.Messages = append(claudeRequest.Messages, claudeMessage)
-			continue
-		}
-		var contents []Content
-		openaiContent := message.ParseContent()
-		for _, part := range openaiContent {
-			var content Content
-			if part.Type == model.ContentTypeText {
-				content.Type = "text"
-				content.Text = part.Text
-			} else if part.Type == model.ContentTypeImageURL {
-				content.Type = "image"
-				content.Source = &ImageSource{
-					Type: "base64",
+		if message.Role == "system" {
+			// Anthropic carries one top-level system string; later system
+			// messages are folded in rather than emitted as role:"system"
+			// messages, which the API rejects.
+			if text := message.StringContent(); text != "" {
+				if claudeRequest.System == "" {
+					claudeRequest.System = text
+				} else {
+					claudeRequest.System += "\n\n" + text
 				}
-				mimeType, data, _ := image.GetImageFromUrl(part.ImageURL.Url)
-				content.Source.MediaType = mimeType
-				content.Source.Data = data
 			}
-			contents = append(contents, content)
+			continue
 		}
-		claudeMessage.Content = contents
+		claudeMessage := Message{}
+		if message.Role == "tool" {
+			// A tool result becomes the tool_result block of a user message.
+			claudeMessage.Role = "user"
+			claudeMessage.Content = append(claudeMessage.Content, Content{
+				Type:      "tool_result",
+				Content:   message.StringContent(),
+				ToolUseId: message.ToolCallId,
+			})
+		} else {
+			claudeMessage.Role = message.Role
+			if message.IsStringContent() {
+				if text := message.StringContent(); text != "" {
+					claudeMessage.Content = append(claudeMessage.Content, Content{
+						Type: "text",
+						Text: text,
+					})
+				}
+			} else {
+				for _, part := range message.ParseContent() {
+					switch part.Type {
+					case model.ContentTypeText:
+						claudeMessage.Content = append(claudeMessage.Content, Content{
+							Type: "text",
+							Text: part.Text,
+						})
+					case model.ContentTypeImageURL:
+						if part.ImageURL == nil {
+							continue
+						}
+						mimeType, data, err := image.GetImageFromUrl(part.ImageURL.Url)
+						if err != nil || data == "" {
+							// Anthropic can only take inline base64 image data;
+							// an unreachable URL is dropped here rather than sent
+							// as an empty source the upstream would reject.
+							logger.SysError("anthropic: dropping unsupported image url: " + part.ImageURL.Url)
+							continue
+						}
+						claudeMessage.Content = append(claudeMessage.Content, Content{
+							Type: "image",
+							Source: &ImageSource{
+								Type:      "base64",
+								MediaType: mimeType,
+								Data:      data,
+							},
+						})
+					}
+				}
+			}
+		}
+		// Tool calls live on the message regardless of how its content was
+		// shaped. This used to sit inside the IsStringContent branch, so an
+		// assistant turn written the standard OpenAI way — content null with
+		// tool_calls — lost every tool_use block and left the following
+		// tool_result without its matching call.
+		for _, toolCall := range message.ToolCalls {
+			claudeMessage.Content = append(claudeMessage.Content, Content{
+				Type:  "tool_use",
+				Id:    toolCall.Id,
+				Name:  toolCall.Function.Name,
+				Input: toolCallInput(toolCall.Function.Arguments),
+			})
+		}
+		if len(claudeMessage.Content) == 0 {
+			// Anthropic rejects an empty content array, so a message that
+			// carried nothing convertible is skipped instead of sent blank.
+			continue
+		}
 		claudeRequest.Messages = append(claudeRequest.Messages, claudeMessage)
 	}
+	claudeRequest.Messages = mergeAdjacentClaudeMessages(claudeRequest.Messages)
 	return &claudeRequest
 }
 
+// stopSequencesOf reads the OpenAI `stop` field, which the spec allows to be
+// either a single string or an array of strings.
+func stopSequencesOf(textRequest model.GeneralOpenAIRequest) []string {
+	switch v := textRequest.Stop.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []string{v}
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// claudeToolChoice maps the OpenAI tool_choice onto Anthropic's object form.
+// Anthropic defaults to auto when tools are present, which is what the OpenAI
+// absent/`auto` cases mean.
+func claudeToolChoice(textRequest model.GeneralOpenAIRequest, tools []Tool) ToolChoice {
+	claudeToolChoice := ToolChoice{Type: "auto"}
+	switch choice := textRequest.ToolChoice.(type) {
+	case string:
+		switch choice {
+		case "required", "any":
+			claudeToolChoice.Type = "any"
+		case "none":
+			claudeToolChoice.Type = "none"
+		case "auto":
+			claudeToolChoice.Type = "auto"
+		}
+	case map[string]any:
+		// {"type":"function","function":{"name":...}} and the flat
+		// {"type":"tool","name":...} shape both name one function.
+		name, _ := choice["name"].(string)
+		if function, ok := choice["function"].(map[string]any); ok {
+			if v, ok := function["name"].(string); ok {
+				name = v
+			}
+		}
+		if name != "" {
+			claudeToolChoice.Type = "tool"
+			claudeToolChoice.Name = name
+		}
+	}
+	if textRequest.ParallelTooCalls != nil && !*textRequest.ParallelTooCalls {
+		disabled := true
+		claudeToolChoice.DisableParallelToolUse = &disabled
+	}
+	return claudeToolChoice
+}
+
+// toolCallInput turns the accumulated argument string of a tool call into the
+// object Anthropic expects for tool_use.input. Anything not a JSON object —
+// empty, malformed, or a non-object literal — becomes an empty object, because
+// `input: null` and scalar inputs are both rejected by the API.
+func toolCallInput(arguments any) map[string]any {
+	empty := map[string]any{}
+	switch v := arguments.(type) {
+	case nil:
+		return empty
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return empty
+		}
+		var input map[string]any
+		if err := json.Unmarshal([]byte(v), &input); err != nil || input == nil {
+			return empty
+		}
+		return input
+	case map[string]any:
+		return v
+	default:
+		// A non-string argument value (some clients send the object directly)
+		// is round-tripped through JSON so it lands as a plain map.
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return empty
+		}
+		var input map[string]any
+		if err := json.Unmarshal(raw, &input); err != nil || input == nil {
+			return empty
+		}
+		return input
+	}
+}
+
+// mergeAdjacentClaudeMessages folds consecutive same-role messages into one.
+// Anthropic requires the turns to alternate, and the OpenAI shape routinely
+// produces runs (several role:"tool" messages after a parallel tool call, a
+// user text turn following them) that would otherwise be rejected.
+func mergeAdjacentClaudeMessages(messages []Message) []Message {
+	merged := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		if n := len(merged); n > 0 && merged[n-1].Role == message.Role {
+			merged[n-1].Content = append(merged[n-1].Content, message.Content...)
+			continue
+		}
+		merged = append(merged, message)
+	}
+	return merged
+}
+
+// StreamState carries the per-stream tool bookkeeping that translating Anthropic
+// content blocks into OpenAI tool_calls deltas needs. OpenAI identifies a tool
+// call by a dense per-message `index` while Anthropic identifies it by content
+// block index, and Anthropic may announce the id/name in one event and stream
+// the arguments in later ones — both have to be reconciled across events, so
+// the state outlives one StreamResponseClaude2OpenAI call.
+type StreamState struct {
+	// toolIndex maps an Anthropic content block index onto the dense OpenAI
+	// tool_calls index. Text/thinking blocks occupy content block indexes but
+	// are not tool calls, so the OpenAI index cannot be the block index.
+	toolIndex map[int]int
+	// args accumulates the argument fragments per content block index, so a
+	// call that streamed no arguments at all can still be closed with `{}`.
+	args map[int]*strings.Builder
+	next int
+}
+
+// NewStreamState creates the per-stream state for one response.
+func NewStreamState() *StreamState {
+	return &StreamState{
+		toolIndex: map[int]int{},
+		args:      map[int]*strings.Builder{},
+	}
+}
+
+// toolSlot returns the OpenAI tool_calls index for an Anthropic content block,
+// assigning the next free one on first sight.
+func (s *StreamState) toolSlot(blockIndex int) int {
+	if idx, ok := s.toolIndex[blockIndex]; ok {
+		return idx
+	}
+	idx := s.next
+	s.next++
+	s.toolIndex[blockIndex] = idx
+	s.args[blockIndex] = &strings.Builder{}
+	return idx
+}
+
+// RewriteEmptyToolArguments returns a delta carrying `{}` for every tool call
+// that streamed no argument fragment, so a client accumulating arguments never
+// receives an empty string it cannot parse. It is emitted on the terminal
+// event, right before finish_reason.
+func (s *StreamState) RewriteEmptyToolArguments() []model.Tool {
+	tools := make([]model.Tool, 0, len(s.toolIndex))
+	for blockIndex, idx := range s.toolIndex {
+		b := s.args[blockIndex]
+		if b == nil || b.Len() > 0 {
+			continue
+		}
+		index := idx
+		tools = append(tools, model.Tool{
+			Index: &index,
+			Function: model.Function{
+				Arguments: "{}",
+			},
+		})
+	}
+	if len(tools) == 0 {
+		return nil
+	}
+	// Stable order keeps the emitted deltas deterministic across runs.
+	sort.Slice(tools, func(i, j int) bool { return *tools[i].Index < *tools[j].Index })
+	return tools
+}
+
 // https://docs.anthropic.com/claude/reference/messages-streaming
-func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCompletionsStreamResponse, *Response) {
+func StreamResponseClaude2OpenAI(state *StreamState, claudeResponse *StreamResponse) (*openai.ChatCompletionsStreamResponse, *Response) {
 	var response *Response
 	var responseText string
 	var stopReason string
@@ -159,9 +367,11 @@ func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCo
 		if claudeResponse.ContentBlock != nil {
 			responseText = claudeResponse.ContentBlock.Text
 			if claudeResponse.ContentBlock.Type == "tool_use" {
+				index := state.toolSlot(claudeResponse.Index)
 				tools = append(tools, model.Tool{
-					Id:   claudeResponse.ContentBlock.Id,
-					Type: "function",
+					Index: &index,
+					Id:    claudeResponse.ContentBlock.Id,
+					Type:  "function",
 					Function: model.Function{
 						Name:      claudeResponse.ContentBlock.Name,
 						Arguments: "",
@@ -173,7 +383,12 @@ func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCo
 		if claudeResponse.Delta != nil {
 			responseText = claudeResponse.Delta.Text
 			if claudeResponse.Delta.Type == "input_json_delta" {
+				index := state.toolSlot(claudeResponse.Index)
+				if b := state.args[claudeResponse.Index]; b != nil {
+					b.WriteString(claudeResponse.Delta.PartialJson)
+				}
 				tools = append(tools, model.Tool{
+					Index: &index,
 					Function: model.Function{
 						Arguments: claudeResponse.Delta.PartialJson,
 					},
@@ -189,6 +404,9 @@ func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCo
 		if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil {
 			stopReason = *claudeResponse.Delta.StopReason
 		}
+		// The terminal event is where a tool call that produced no arguments
+		// gets its `{}`.
+		tools = append(tools, state.RewriteEmptyToolArguments()...)
 	}
 	var choice openai.ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = responseText
@@ -197,8 +415,10 @@ func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCo
 		choice.Delta.ToolCalls = tools
 	}
 	choice.Delta.Role = "assistant"
-	finishReason := stopReasonClaude2OpenAI(&stopReason)
-	if finishReason != "null" {
+	// finish_reason must only be set when the turn actually ended: every other
+	// chunk carries nil, because OpenAI clients treat any non-null finish_reason
+	// as the end of the stream (the old code emitted "" on every chunk).
+	if finishReason := stopReasonClaude2OpenAI(&stopReason); finishReason != "" {
 		choice.FinishReason = &finishReason
 	}
 	var openaiResponse openai.ChatCompletionsStreamResponse
@@ -208,10 +428,10 @@ func StreamResponseClaude2OpenAI(claudeResponse *StreamResponse) (*openai.ChatCo
 }
 
 func ResponseClaude2OpenAI(claudeResponse *Response) *openai.TextResponse {
-	var responseText string
-	if len(claudeResponse.Content) > 0 {
-		responseText = claudeResponse.Content[0].Text
-	}
+	// Anthropic returns the answer as an ordered block list that may hold
+	// several text blocks around the tool calls; every text block has to be
+	// concatenated, not just the first one.
+	var responseText strings.Builder
 	tools := make([]model.Tool, 0)
 	for _, v := range claudeResponse.Content {
 		if v.Type == "tool_use" {
@@ -224,17 +444,32 @@ func ResponseClaude2OpenAI(claudeResponse *Response) *openai.TextResponse {
 					Arguments: string(args),
 				},
 			})
+			continue
+		}
+		if v.Text != "" {
+			responseText.WriteString(v.Text)
+		}
+	}
+	text := responseText.String()
+	// OpenAI clients require a finish_reason; an unmapped or absent upstream
+	// stop_reason becomes tool_calls when calls were returned, else stop.
+	finishReason := stopReasonClaude2OpenAI(claudeResponse.StopReason)
+	if finishReason == "" {
+		if len(tools) > 0 {
+			finishReason = "tool_calls"
+		} else {
+			finishReason = "stop"
 		}
 	}
 	choice := openai.TextResponseChoice{
 		Index: 0,
 		Message: model.Message{
 			Role:      "assistant",
-			Content:   responseText,
+			Content:   text,
 			Name:      nil,
 			ToolCalls: tools,
 		},
-		FinishReason: stopReasonClaude2OpenAI(claudeResponse.StopReason),
+		FinishReason: finishReason,
 	}
 	fullTextResponse := openai.TextResponse{
 		Id:      fmt.Sprintf("chatcmpl-%s", claudeResponse.Id),
@@ -267,7 +502,9 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	var usage model.Usage
 	var modelName string
 	var id string
-	var lastToolCallChoice openai.ChatCompletionsStreamResponseChoice
+	// The tool call index/argument bookkeeping spans the whole stream, so it
+	// lives outside the per-event conversion.
+	streamState := NewStreamState()
 
 	for scanner.Scan() {
 		data := scanner.Text()
@@ -284,7 +521,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 			continue
 		}
 
-		response, meta := StreamResponseClaude2OpenAI(&claudeResponse)
+		response, meta := StreamResponseClaude2OpenAI(streamState, &claudeResponse)
 		if meta != nil {
 			usage.PromptTokens += meta.Usage.InputTokens
 			usage.CompletionTokens += meta.Usage.OutputTokens
@@ -303,15 +540,6 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 				modelName = meta.Model
 				id = fmt.Sprintf("chatcmpl-%s", meta.Id)
 				continue
-			} else { // finish_reason case
-				if len(lastToolCallChoice.Delta.ToolCalls) > 0 {
-					lastArgs := &lastToolCallChoice.Delta.ToolCalls[len(lastToolCallChoice.Delta.ToolCalls)-1].Function
-					if len(lastArgs.Arguments.(string)) == 0 { // compatible with OpenAI sending an empty object `{}` when no arguments.
-						lastArgs.Arguments = "{}"
-						response.Choices[len(response.Choices)-1].Delta.Content = nil
-						response.Choices[len(response.Choices)-1].Delta.ToolCalls = lastToolCallChoice.Delta.ToolCalls
-					}
-				}
 			}
 		}
 		if response == nil {
@@ -322,11 +550,6 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		response.Model = modelName
 		response.Created = createdTime
 
-		for _, choice := range response.Choices {
-			if len(choice.Delta.ToolCalls) > 0 {
-				lastToolCallChoice = choice
-			}
-		}
 		err = render.ObjectData(c, response)
 		if err != nil {
 			logger.SysError(err.Error())

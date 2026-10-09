@@ -20,7 +20,6 @@ import (
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
 	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
@@ -139,7 +138,8 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	var usage relaymodel.Usage
 	var id string
-	var lastToolCallChoice openai.ChatCompletionsStreamResponseChoice
+	// The tool call index/argument bookkeeping spans the whole stream.
+	streamState := anthropic.NewStreamState()
 
 	c.Stream(func(w io.Writer) bool {
 		event, ok := <-stream.Events()
@@ -157,22 +157,13 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 				return false
 			}
 
-			response, meta := anthropic.StreamResponseClaude2OpenAI(claudeResp)
+			response, meta := anthropic.StreamResponseClaude2OpenAI(streamState, claudeResp)
 			if meta != nil {
 				usage.PromptTokens += meta.Usage.InputTokens
 				usage.CompletionTokens += meta.Usage.OutputTokens
 				if len(meta.Id) > 0 { // only message_start has an id, otherwise it's a finish_reason event.
 					id = fmt.Sprintf("chatcmpl-%s", meta.Id)
 					return true
-				} else { // finish_reason case
-					if len(lastToolCallChoice.Delta.ToolCalls) > 0 {
-						lastArgs := &lastToolCallChoice.Delta.ToolCalls[len(lastToolCallChoice.Delta.ToolCalls)-1].Function
-						if len(lastArgs.Arguments.(string)) == 0 { // compatible with OpenAI sending an empty object `{}` when no arguments.
-							lastArgs.Arguments = "{}"
-							response.Choices[len(response.Choices)-1].Delta.Content = nil
-							response.Choices[len(response.Choices)-1].Delta.ToolCalls = lastToolCallChoice.Delta.ToolCalls
-						}
-					}
 				}
 			}
 			if response == nil {
@@ -182,11 +173,6 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 			response.Model = c.GetString(ctxkey.OriginalModel)
 			response.Created = createdTime
 
-			for _, choice := range response.Choices {
-				if len(choice.Delta.ToolCalls) > 0 {
-					lastToolCallChoice = choice
-				}
-			}
 			jsonStr, err := json.Marshal(response)
 			if err != nil {
 				logger.SysError("error marshalling stream response: " + err.Error())
