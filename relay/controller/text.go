@@ -66,11 +66,11 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
 		logger.Errorf(ctx, "DoRequest failed: %s", err.Error())
-		recordUsage(ctx, meta, textRequest, nil, model.UsageStatusError)
+		recordUsage(ctx, meta, textRequest.Model, nil, model.UsageStatusError)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
-		recordUsage(ctx, meta, textRequest, nil, model.UsageStatusError)
+		recordUsage(ctx, meta, textRequest.Model, nil, model.UsageStatusError)
 		return RelayErrorHandler(resp)
 	}
 
@@ -78,25 +78,30 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
 	if respErr != nil {
 		logger.Errorf(ctx, "respErr is not nil: %+v", respErr)
-		recordUsage(ctx, meta, textRequest, usage, model.UsageStatusError)
+		recordUsage(ctx, meta, textRequest.Model, usage, model.UsageStatusError)
 		return respErr
 	}
 	// legacy consumption log (quota-free) + usage fact
-	go recordConsumeLog(ctx, usage, meta, textRequest, systemPromptReset)
-	go recordUsage(ctx, meta, textRequest, usage, model.UsageStatusSuccess)
+	go recordConsumeLog(ctx, usage, meta, textRequest.Model, systemPromptReset)
+	go recordUsage(ctx, meta, textRequest.Model, usage, model.UsageStatusSuccess)
 	return nil
 }
 
 // recordUsage persists the usage fact alongside the legacy quota path during
 // the parallel-run phase (implementation doc §5.1 step 1-2). Recording failure
 // must never overwrite the upstream response error.
-func recordUsage(ctx context.Context, meta *meta.Meta, textRequest *model.GeneralOpenAIRequest, u *model.Usage, status string) {
+//
+// The model name is passed as a string rather than read off a normalized
+// request: the same-protocol passthrough path never builds one, and inventing a
+// GeneralOpenAIRequest just to carry a name for the record would mean
+// normalizing a request that is deliberately forwarded untouched.
+func recordUsage(ctx context.Context, meta *meta.Meta, modelName string, u *model.Usage, status string) {
 	input := usagelog.RecordInput{
 		RequestID: helper.GetRequestID(ctx),
 		UserID:    meta.UserId,
 		TokenID:   meta.TokenId,
 		ChannelID: meta.ChannelId,
-		ModelName: textRequest.Model,
+		ModelName: modelName,
 		Stream:    meta.IsStream,
 		Status:    status,
 	}

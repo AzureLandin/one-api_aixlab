@@ -522,25 +522,12 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 
 		response, meta := StreamResponseClaude2OpenAI(streamState, &claudeResponse)
-		if meta != nil {
-			usage.PromptTokens += meta.Usage.InputTokens
-			usage.CompletionTokens += meta.Usage.OutputTokens
-			// Values came from upstream usage events, so this stream is reported.
-			usage.Source = model.UsageSourceReported
-			// Cache fields are reported on message_start (input side) and echoed on
-			// the terminal delta; adopt the latest non-nil value rather than summing,
-			// so a cache read is never double counted (§8.1/§8.2).
-			if v := i64Ptr(meta.Usage.CacheReadInputTokens); v != nil {
-				usage.CacheReadInputTokens = v
-			}
-			if v := i64Ptr(meta.Usage.CacheCreationInputTokens); v != nil {
-				usage.CacheWriteInputTokens = v
-			}
-			if len(meta.Id) > 0 { // only message_start has an id, otherwise it's a finish_reason event.
-				modelName = meta.Model
-				id = fmt.Sprintf("chatcmpl-%s", meta.Id)
-				continue
-			}
+		if AccumulateStreamUsage(&usage, &claudeResponse) && meta != nil && len(meta.Id) > 0 {
+			// Only message_start carries an id; every other usage-bearing event is
+			// a finish_reason delta that still has to be rendered below.
+			modelName = meta.Model
+			id = fmt.Sprintf("chatcmpl-%s", meta.Id)
+			continue
 		}
 		if response == nil {
 			continue
@@ -596,17 +583,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	}
 	fullTextResponse := ResponseClaude2OpenAI(&claudeResponse)
 	fullTextResponse.Model = modelName
-	usage := model.Usage{
-		PromptTokens:     claudeResponse.Usage.InputTokens,
-		CompletionTokens: claudeResponse.Usage.OutputTokens,
-		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
-		// §8.1: Anthropic cache_read -> normalized cache_read, cache_creation ->
-		// normalized cache_write. nil (absent) stays nil, never a fabricated 0.
-		CacheReadInputTokens:  i64Ptr(claudeResponse.Usage.CacheReadInputTokens),
-		CacheWriteInputTokens: i64Ptr(claudeResponse.Usage.CacheCreationInputTokens),
-		// These numbers came from the upstream body, so they are reported.
-		Source: model.UsageSourceReported,
-	}
+	usage := RelayUsage(claudeResponse.Usage)
 	fullTextResponse.Usage = usage
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
@@ -616,6 +593,71 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, err = c.Writer.Write(jsonResponse)
 	return nil, &usage
+}
+
+// RelayUsage converts one Anthropic usage block into the normalized usage fact.
+// The cache fields keep their pointer identity: an absent field stays nil and is
+// never coerced to a zero cache hit (§8.1/§8.2).
+func RelayUsage(u Usage) model.Usage {
+	out := model.Usage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.InputTokens + u.OutputTokens,
+		// §8.1: Anthropic cache_read -> normalized cache_read, cache_creation ->
+		// normalized cache_write.
+		CacheReadInputTokens:  i64Ptr(u.CacheReadInputTokens),
+		CacheWriteInputTokens: i64Ptr(u.CacheCreationInputTokens),
+		// These numbers came from the upstream body, so they are reported.
+		Source: model.UsageSourceReported,
+	}
+	model.NormalizeUsage(&out)
+	return out
+}
+
+// AccumulateStreamUsage folds one Anthropic stream event's usage into acc and
+// reports whether the event carried usage at all. It is shared by the chat
+// adaptor's StreamHandler and by the same-protocol passthrough, so both paths
+// obey one rule instead of two.
+//
+// The rule is subtle and is the whole reason this lives in one place:
+//   - message_start reports the input side and announces a *running* output
+//     count, which the terminal delta supersedes.
+//   - message_delta's usage.output_tokens is the *cumulative* count for the
+//     whole message, so it is assigned, never added. Summing the events counts
+//     the completion twice (message_start announces output_tokens: 1, hence the
+//     classic off-by-one over-count of every Anthropic stream).
+//
+// Cache fields are adopted only when the event carries them: an absent field
+// keeps its previous value and stays nil, never a fabricated 0.
+func AccumulateStreamUsage(acc *model.Usage, ev *StreamResponse) bool {
+	switch {
+	case ev.Message != nil:
+		u := RelayUsage(ev.Message.Usage)
+		acc.PromptTokens = u.PromptTokens
+		acc.CompletionTokens = u.CompletionTokens
+		acc.TotalTokens = u.TotalTokens
+		acc.CacheReadInputTokens = u.CacheReadInputTokens
+		acc.CacheWriteInputTokens = u.CacheWriteInputTokens
+		acc.Source = model.UsageSourceReported
+		return true
+	case ev.Usage != nil:
+		// Cumulative, not incremental. Input is not repeated here, so it is only
+		// taken when the event actually states it.
+		if ev.Usage.InputTokens > 0 {
+			acc.PromptTokens = ev.Usage.InputTokens
+		}
+		acc.CompletionTokens = ev.Usage.OutputTokens
+		if v := i64Ptr(ev.Usage.CacheReadInputTokens); v != nil {
+			acc.CacheReadInputTokens = v
+		}
+		if v := i64Ptr(ev.Usage.CacheCreationInputTokens); v != nil {
+			acc.CacheWriteInputTokens = v
+		}
+		acc.TotalTokens = acc.PromptTokens + acc.CompletionTokens
+		acc.Source = model.UsageSourceReported
+		return true
+	}
+	return false
 }
 
 // i64Ptr converts an Anthropic *int usage field to the normalized *int64 cache

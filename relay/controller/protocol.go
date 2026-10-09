@@ -14,12 +14,12 @@ import (
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/apitype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/protocol"
 	"github.com/songquanpeng/one-api/relay/relaymode"
 	"github.com/songquanpeng/one-api/relay/sse"
+	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
 // streamFactory builds a protocol-specific typed SSE writer for a stream.
@@ -39,7 +39,10 @@ type protocolStream interface {
 // itself (distributor -> adaptor -> upstream -> usage recorder) is shared and
 // never sees a client-specific structure (implementation doc §6.1).
 type protocolEntry struct {
-	Name      string
+	Name string
+	// Protocol is the client protocol this entry point speaks. It is what the
+	// capability check and the passthrough decision are made against.
+	Protocol  upstream.Protocol
 	Parse     func([]byte) (*relaymodel.GeneralOpenAIRequest, *protocol.ProtocolError)
 	Render    func(*openai.TextResponse, string) map[string]any
 	NewStream streamFactory
@@ -56,6 +59,32 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	body, err := common.GetRequestBody(c)
 	if err != nil {
 		return openai.ErrorWrapper(err, "read_request_body_failed", http.StatusBadRequest)
+	}
+
+	// Upstream capability check (§6.6). It runs before the request is parsed
+	// because the answer does not depend on the parsed form, and because the
+	// passthrough branch below must be reached with the client's own body
+	// untouched.
+	upstreamProtocol := upstream.Resolve(meta.Config.UpstreamProtocol, meta.APIType)
+	if !upstream.CanServe(entry.Protocol, upstreamProtocol) {
+		// The model name is read straight off the raw body: no normalized
+		// request exists on this branch, and the error row still wants a name.
+		modelName, stream := nativeRequestMeta(body)
+		meta.ActualModelName = modelName
+		meta.IsStream = stream
+		recordUsage(ctx, meta, modelName, nil, relaymodel.UsageStatusError)
+		return openai.ErrorWrapper(
+			fmt.Errorf("渠道 %d 的上游协议 %s 无法服务 %s 入口",
+				meta.ChannelId, upstreamProtocol, entry.Name),
+			"upstream_protocol_unsupported", http.StatusBadRequest)
+	}
+
+	// Same upstream protocol: forward the request as the client wrote it. This
+	// is the only path that keeps cache_control, thinking and hosted tool
+	// declarations byte-for-byte, and it exists precisely so that the client's
+	// own protocol is never round-tripped through a lossy intermediate form.
+	if upstream.Passthrough(entry.Protocol, upstreamProtocol) {
+		return relayPassthrough(c, meta, entry, body)
 	}
 
 	normalized, perr := entry.Parse(body)
@@ -91,18 +120,8 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 
 	// Per-model overrides configured on the channel, identical to the chat path.
 	if bizErr := applyModelConfigOverrides(meta, normalized); bizErr != nil {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return bizErr
-	}
-
-	// Upstream capability check (§6.6): stage 3/4 supports OpenAI-compatible
-	// upstreams only; other API types are rejected explicitly, not guessed.
-	if meta.APIType != apitype.OpenAI {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
-		return openai.ErrorWrapper(
-			fmt.Errorf("渠道类型 %d 不支持 %s 入口（当前仅支持 OpenAI 兼容上游，其他上游协议在后续阶段接入）",
-				meta.ChannelType, entry.Name),
-			"upstream_protocol_unsupported", http.StatusBadRequest)
 	}
 
 	adaptor := relay.GetAdaptor(meta.APIType)
@@ -114,7 +133,7 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	// Rewrite the request as a canonical OpenAI /v1/chat/completions call.
 	requestBody, err := json.Marshal(normalized)
 	if err != nil {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
 	}
 	savedPath := meta.RequestURLPath
@@ -122,11 +141,11 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	resp, err := adaptor.DoRequest(c, meta, bytes.NewReader(requestBody))
 	meta.RequestURLPath = savedPath
 	if err != nil {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return RelayErrorHandler(resp)
 	}
 
@@ -136,15 +155,15 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 
 	textResponse, usage, readErr := readOpenAIUsage(resp, meta)
 	if readErr != nil {
-		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return readErr
 	}
 
 	envelope := entry.Render(textResponse, normalized.Model)
 	renderProtocolJSON(c, envelope)
 
-	go recordConsumeLog(ctx, usage, meta, normalized, systemPromptReset)
-	go recordUsage(ctx, meta, normalized, usage, relaymodel.UsageStatusSuccess)
+	go recordConsumeLog(ctx, usage, meta, normalized.Model, systemPromptReset)
+	go recordUsage(ctx, meta, normalized.Model, usage, relaymodel.UsageStatusSuccess)
 	return nil
 }
 
@@ -219,8 +238,8 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 	}
 
 	_ = resp.Body.Close()
-	recordUsage(ctx, m, normalized, usage, status)
-	go recordConsumeLog(ctx, usage, m, normalized, systemPromptReset)
+	recordUsage(ctx, m, normalized.Model, usage, status)
+	go recordConsumeLog(ctx, usage, m, normalized.Model, systemPromptReset)
 	return nil
 }
 

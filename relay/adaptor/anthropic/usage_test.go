@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -103,5 +104,115 @@ func TestHandler_ReportedZeroCacheIsReported(t *testing.T) {
 	// the not_reported case above.
 	if u.CacheStatus != relaymodel.CacheUsageReported {
 		t.Fatalf("CacheStatus = %s, want reported", u.CacheStatus)
+	}
+}
+
+// accumulateStream folds a sequence of raw Anthropic SSE payloads through the
+// shared accumulator, exactly as StreamHandler and the passthrough do.
+func accumulateStream(t *testing.T, payloads ...string) relaymodel.Usage {
+	t.Helper()
+	var acc relaymodel.Usage
+	for _, payload := range payloads {
+		var ev StreamResponse
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			t.Fatalf("bad fixture %s: %v", payload, err)
+		}
+		if !AccumulateStreamUsage(&acc, &ev) {
+			t.Fatalf("fixture %s carried no usage, want usage", payload)
+		}
+	}
+	return acc
+}
+
+// The terminal delta carries the cumulative output count for the whole message,
+// so adding the events together would count the completion more than once —
+// message_start announces a running count of 1, which is where the classic
+// off-by-one over-count of an Anthropic stream comes from.
+func TestAccumulateStreamUsage_OutputIsAssignedNotAdded(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":100,"output_tokens":1}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+		`{"type":"message_delta","usage":{"output_tokens":25}}`,
+	)
+	if u.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", u.PromptTokens)
+	}
+	if u.CompletionTokens != 25 {
+		t.Fatalf("CompletionTokens = %d, want 25 (cumulative, not summed)", u.CompletionTokens)
+	}
+	if u.Source != relaymodel.UsageSourceReported {
+		t.Fatalf("Source = %s, want reported", u.Source)
+	}
+}
+
+// The input side is announced once, by message_start. A later delta that does
+// not repeat it must not zero it.
+func TestAccumulateStreamUsage_LaterDeltaDoesNotClobberInput(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}`,
+		`{"type":"message_delta","usage":{"output_tokens":25}}`,
+	)
+	if u.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", u.PromptTokens)
+	}
+}
+
+// Cache fields are adopted from whichever event reports them, latest non-nil
+// wins: they must never be summed (a cache read is not a quantity that grows),
+// and a delta that omits one must not erase the value message_start gave.
+func TestAccumulateStreamUsage_CacheAdoptedNotSummed(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1,
+			"cache_read_input_tokens":40,"cache_creation_input_tokens":25}}}`,
+		`{"type":"message_delta","usage":{"output_tokens":10,"cache_read_input_tokens":40}}`,
+	)
+	if u.CacheReadInputTokens == nil || *u.CacheReadInputTokens != 40 {
+		t.Fatalf("cache read = %v, want 40 (adopted, not summed)", u.CacheReadInputTokens)
+	}
+	if u.CacheWriteInputTokens == nil || *u.CacheWriteInputTokens != 25 {
+		t.Fatalf("cache write = %v, want 25 kept from message_start", u.CacheWriteInputTokens)
+	}
+}
+
+func TestAccumulateStreamUsage_AbsentCacheStaysNil(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}`,
+		`{"type":"message_delta","usage":{"output_tokens":10}}`,
+	)
+	if u.CacheReadInputTokens != nil || u.CacheWriteInputTokens != nil {
+		t.Fatalf("absent cache must stay nil, got read=%v write=%v",
+			u.CacheReadInputTokens, u.CacheWriteInputTokens)
+	}
+	relaymodel.NormalizeUsage(&u)
+	if u.CacheStatus != relaymodel.CacheUsageNotReported {
+		t.Fatalf("CacheStatus = %s, want not_reported", u.CacheStatus)
+	}
+}
+
+func TestAccumulateStreamUsage_ReportedZeroCacheStaysReported(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1,
+			"cache_read_input_tokens":0}}}`,
+	)
+	if u.CacheReadInputTokens == nil || *u.CacheReadInputTokens != 0 {
+		t.Fatalf("reported zero must stay ptr-to-0, got %v", u.CacheReadInputTokens)
+	}
+	relaymodel.NormalizeUsage(&u)
+	if u.CacheStatus != relaymodel.CacheUsageReported {
+		t.Fatalf("CacheStatus = %s, want reported", u.CacheStatus)
+	}
+}
+
+func TestAccumulateStreamUsage_IgnoresEventsWithoutUsage(t *testing.T) {
+	acc := relaymodel.Usage{PromptTokens: 5, CompletionTokens: 6}
+	var ev StreamResponse
+	if err := json.Unmarshal([]byte(`{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if AccumulateStreamUsage(&acc, &ev) {
+		t.Fatal("event without usage reported true")
+	}
+	if acc.PromptTokens != 5 || acc.CompletionTokens != 6 {
+		t.Fatalf("accumulator mutated by a usage-less event: %+v", acc)
 	}
 }

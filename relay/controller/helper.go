@@ -57,7 +57,7 @@ func getPromptTokens(textRequest *relaymodel.GeneralOpenAIRequest, relayMode int
 // ratio semantics (implementation doc §5.1 step 4: the settlement role of
 // postConsumeQuota is migrated to the usage recorder; this keeps old log
 // pages readable during the transition).
-func recordConsumeLog(ctx context.Context, usage *relaymodel.Usage, meta *meta.Meta, textRequest *relaymodel.GeneralOpenAIRequest, systemPromptReset bool) {
+func recordConsumeLog(ctx context.Context, usage *relaymodel.Usage, meta *meta.Meta, modelName string, systemPromptReset bool) {
 	if usage == nil {
 		usage = &relaymodel.Usage{}
 	}
@@ -67,7 +67,7 @@ func recordConsumeLog(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		ChannelId:         meta.ChannelId,
 		PromptTokens:      usage.PromptTokens,
 		CompletionTokens:  usage.CompletionTokens,
-		ModelName:         textRequest.Model,
+		ModelName:         modelName,
 		TokenName:         meta.TokenName,
 		Quota:             0,
 		Content:           logContent,

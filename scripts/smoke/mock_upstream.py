@@ -7,6 +7,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # /v1/messages request (nested text/role shapes the client never sends).
 LAST_REQUEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_last_request.json")
 
+# Every /messages request is parked here with its body and the beta/version
+# headers, so the smoke script can prove that same-protocol passthrough carried
+# the client's own fields (cache_control, thinking, hosted tool declarations)
+# through untouched, and that the gateway's own anthropic-beta flag was merged
+# into the client's rather than replacing it.
+LAST_MESSAGES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_last_messages.json")
+
+# The input side and the cache read, reported once by message_start. The terminal
+# delta reports output_tokens: 12 as the CUMULATIVE count, so a gateway that adds
+# the events together records 13.
+MESSAGES_USAGE = {"input_tokens": 50, "output_tokens": 12, "cache_read_input_tokens": 40}
+
 
 def sse_event(obj, event=None):
     """Frame one OpenAI chat.completion.chunk (event line only when present)."""
@@ -76,6 +88,61 @@ def stream_tool_chunks():
         "usage": {"prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20},
     })
     yield b"data: [DONE]\n\n"
+
+
+def messages_response(model):
+    """An Anthropic non-streaming body. The thinking block carries a `signature`
+    field that the gateway's own Content struct has no slot for: if the relay
+    re-rendered this envelope instead of forwarding it, the field would vanish."""
+    return {
+        "id": "msg_mock", "type": "message", "role": "assistant",
+        "model": model or "claude-mock",
+        "content": [
+            {"type": "thinking", "thinking": "weighing it", "signature": "sig_mock"},
+            {"type": "text", "text": "ok"},
+        ],
+        "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": dict(MESSAGES_USAGE),
+    }
+
+
+def messages_stream():
+    """A real Anthropic SSE sequence: message_start (input side + cache read,
+    running output count), a thinking block, a text block, then the terminal
+    message_delta carrying the cumulative output count, then message_stop."""
+    def ev(event, obj):
+        return sse_event(obj, event=event)
+
+    yield ev("message_start", {
+        "type": "message_start", "message": {
+            "id": "msg_mock", "type": "message", "role": "assistant",
+            "model": "claude-mock", "content": [], "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 50, "output_tokens": 1,
+                      "cache_read_input_tokens": 40},
+        }})
+    yield ev("content_block_start", {
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "thinking", "thinking": ""}})
+    yield ev("content_block_delta", {
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": "weighing it"}})
+    yield ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    yield ev("content_block_start", {
+        "type": "content_block_start", "index": 1,
+        "content_block": {"type": "text", "text": ""}})
+    yield ev("content_block_delta", {
+        "type": "content_block_delta", "index": 1,
+        "delta": {"type": "text_delta", "text": "o"}})
+    yield ev("content_block_delta", {
+        "type": "content_block_delta", "index": 1,
+        "delta": {"type": "text_delta", "text": "k"}})
+    yield ev("content_block_stop", {"type": "content_block_stop", "index": 1})
+    yield ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 12}})
+    yield ev("message_stop", {"type": "message_stop"})
 
 
 TOOL_CALLS = [
@@ -170,6 +237,32 @@ class MockHandler(BaseHTTPRequestHandler):
                 }],
                 "usage": usage,
             }).encode()
+        elif self.path.endswith("/messages"):
+            record = {
+                "raw": raw.decode("utf-8", "replace"),
+                "anthropic-beta": self.headers.get("anthropic-beta", ""),
+                "anthropic-version": self.headers.get("anthropic-version", ""),
+            }
+            try:
+                record["body"] = json.loads(raw)
+            except Exception:
+                record["body"] = None
+            try:
+                with open(LAST_MESSAGES, "w") as fh:
+                    json.dump(record, fh)
+            except OSError:
+                pass
+
+            if wants_stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                for chunk in messages_stream():
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                return
+            body = json.dumps(messages_response((record["body"] or {}).get("model"))).encode()
         else:
             body = b'{"error":"not found"}'
         self.send_response(200)

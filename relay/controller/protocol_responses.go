@@ -6,12 +6,14 @@ import (
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/protocol"
 	"github.com/songquanpeng/one-api/relay/sse"
+	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
 var responsesEntry = &protocolEntry{
-	Name:   "/v1/responses",
-	Parse:  protocol.ParseResponses,
-	Render: protocol.RenderResponses,
+	Name:     "/v1/responses",
+	Protocol: upstream.OpenAIResponses,
+	Parse:    protocol.ParseResponses,
+	Render:   protocol.RenderResponses,
 	NewStream: func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage) protocolStream {
 		return protocol.NewResponsesStream(w, id, model)
 	},

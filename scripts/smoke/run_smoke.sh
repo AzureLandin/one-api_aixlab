@@ -12,7 +12,9 @@ rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_cache.json tmp_sum.json tmp_models.json tmp_model1.json \
       tmp_resp_sse.h tmp_resp_sse.txt tmp_msg_sse.h tmp_msg_sse.txt mock_last_request.json \
       tmp_tool_chat.json tmp_tool_chat_sse.txt tmp_tool_resp.json tmp_tool_resp_sse.txt \
-      tmp_tool_msg.json tmp_tool_msg_sse.txt tmp_tool_turn.json
+      tmp_tool_msg.json tmp_tool_msg_sse.txt tmp_tool_turn.json \
+      tmp_ch_anthropic.json tmp_ch_gemini.json tmp_pass_msg.json tmp_pass_msg_sse.h \
+      tmp_pass_msg_sse.txt tmp_pass_reject.json tmp_pass_chat.json mock_last_messages.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -195,32 +197,141 @@ sleep 1
 CR=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
 check "cached_tokens→reported cache_read=3" "reported|3|reported" "$CR"
 
+# 16c. 同协议直通：/v1/messages → 声明 anthropic-messages 的上游
+#      该渠道只列出 claude-mock-sonnet，因此选渠道是确定的（模型名即能力键）。
+#      channel.model_mapping 让"定点补丁只换 model"这一条也能被端到端验证。
+curl -s -b jar_root.txt -X POST http://127.0.0.1:13000/api/channel/ \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"mock-anthropic","type":14,"base_url":"http://127.0.0.1:19999","key":"sk-anthropic",
+       "models":"claude-mock-sonnet","group":"default","priority":1,"weight":1,"status":1,
+       "model_mapping":"{\"claude-mock-sonnet\":\"claude-upstream-actual\"}",
+       "config":"{\"upstream_protocol\":\"anthropic-messages\"}"}' > tmp_ch_anthropic.json
+check "create anthropic-messages channel" true "$(sed -n 's/.*"success":\([a-z]*\).*/\1/p;q' tmp_ch_anthropic.json)"
+
+# 客户端自己的请求体：thinking / cache_control / hosted tool 声明都是规范化路径
+# 表达不了的字段，直通必须原样带过去（结构化往返会丢，甚至会被具名拒绝）。
+PASS_HEAD='{"model":"claude-mock-sonnet","max_tokens":64,'
+PASS_BODY='"system":[{"type":"text","text":"be brief","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"enabled","budget_tokens":2048},"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5},{"name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}'
+BETA='computer-use-2025-01-24'
+
+# 16c-1 非流式：客户端收到的是上游自己的信封，不是重新渲染的
+CODE=$(curl -s -o tmp_pass_msg.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H "anthropic-beta: $BETA" \
+  -H 'Content-Type: application/json' -d "$PASS_HEAD$PASS_BODY")
+check "passthrough messages 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: passthrough forwards the upstream envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_pass_msg.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_pass_msg.json'))
+# 上游自己的 id + 一个本仓库 Content 结构体没有槽位的 thinking 签名：
+# 只要响应被重新渲染过，signature 就会消失。
+ok=(d.get('id')=='msg_mock' and d.get('type')=='message' and d.get('stop_reason')=='end_turn'
+    and [b.get('type') for b in d.get('content',[])]==['thinking','text']
+    and d['content'][0].get('signature')=='sig_mock')
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+MR=$(sqlite3 one-api.db "select status||'|'||usage_source||'|'||input_tokens||'|'||output_tokens||'|'||cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||coalesce(cache_write_input_tokens,-1)||'|'||total_tokens from usage_records order by id desc limit 1;")
+check "passthrough non-stream usage fact" "success|reported|50|12|reported|40|-1|62" "$MR"
+
+# 16c-2 流式：逐事件镜像上游 SSE（含 thinking 块与缓存字段），无 [DONE] 尾标
+curl -s -N -D tmp_pass_msg_sse.h -o tmp_pass_msg_sse.txt -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H "anthropic-beta: $BETA" \
+  -H 'Content-Type: application/json' -d "$PASS_HEAD\"stream\":true,$PASS_BODY"
+grep -qi 'text/event-stream' tmp_pass_msg_sse.h \
+  && { echo "PASS: passthrough stream content-type"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_pass_msg_sse.h)"; fail=$((fail+1)); }
+grep -q 'event: message_start' tmp_pass_msg_sse.txt \
+  && grep -q 'event: content_block_delta' tmp_pass_msg_sse.txt \
+  && grep -q 'event: message_delta' tmp_pass_msg_sse.txt \
+  && grep -q 'event: message_stop' tmp_pass_msg_sse.txt \
+  && { echo "PASS: passthrough mirrors upstream SSE events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_pass_msg_sse.txt)"; fail=$((fail+1)); }
+grep -q '"thinking_delta"' tmp_pass_msg_sse.txt \
+  && grep -q '"cache_read_input_tokens": *40' tmp_pass_msg_sse.txt \
+  && { echo "PASS: passthrough keeps thinking + cache fields on the wire"; pass=$((pass+1)); } || { echo "FAIL: $(cat tmp_pass_msg_sse.txt)"; fail=$((fail+1)); }
+# 逐字节镜像：上游 payload 里的空白也原样抵达客户端。Go 侧任何一次
+# json.Marshal 重新序列化都会去掉 `": "` 的空格，所以这条断言直接证明事件没有被重渲染。
+grep -qF 'data: {"type": "message_stop"}' tmp_pass_msg_sse.txt \
+  && grep -qF '{"type": "thinking", "thinking": ""}' tmp_pass_msg_sse.txt \
+  && { echo "PASS: upstream event bytes mirrored verbatim"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_pass_msg_sse.txt)"; fail=$((fail+1)); }
+grep -q '\[DONE\]' tmp_pass_msg_sse.txt \
+  && { echo "FAIL: [DONE] leaked into an Anthropic stream"; fail=$((fail+1)); } \
+  || { echo "PASS: no OpenAI [DONE] marker in messages stream"; pass=$((pass+1)); }
+# 用量归集：message_delta 的 output_tokens 是累计值，赋值而非累加（累加会得 13）
+sleep 1
+CUM=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=50 and output_tokens=12 and total_tokens=62 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
+[ "$CUM" = 2 ] && { echo "PASS: passthrough stream usage cumulative, absent cache NULL"; pass=$((pass+1)); } || { echo "FAIL: matching passthrough rows=$CUM (want 2)"; fail=$((fail+1)); }
+
+# 16c-3 上游收到的是客户端自己的字节：模型已映射，其余字段逐字未改
+python3 - <<'PY' && { echo "PASS: upstream request kept the client's native fields"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_messages.json)"; fail=$((fail+1)); }
+import json,sys
+r=json.load(open('mock_last_messages.json'))
+b=r['body'] or {}
+ok=(b.get('model')=='claude-upstream-actual'
+    and b.get('thinking')=={'type':'enabled','budget_tokens':2048}
+    and b['system'][0]['cache_control']=={'type':'ephemeral'}
+    and b['messages'][0]['content'][0]['cache_control']=={'type':'ephemeral'}
+    and b['tools'][0]['type']=='web_search_20250305'
+    and b['tools'][0]['max_uses']==5
+    and b['tools'][1]['input_schema']['properties']['city']['type']=='string'
+    and b.get('stream') is True)
+sys.exit(0 if ok else 1)
+PY
+python3 - <<'PY' && { echo "PASS: anthropic-beta merged, not overwritten"; pass=$((pass+1)); } || { echo "FAIL: beta=$(python3 -c "import json;print(json.load(open('mock_last_messages.json'))['anthropic-beta'])")"; fail=$((fail+1)); }
+import json,sys
+beta=json.load(open('mock_last_messages.json'))['anthropic-beta']
+got=[p.strip() for p in beta.split(',') if p.strip()]
+sys.exit(0 if 'computer-use-2025-01-24' in got and 'messages-2023-12-15' in got else 1)
+PY
+
+# 16d. 能力拒绝格子：不翻译的渠道族（Gemini）在 /v1/responses 入口被按能力排除
+curl -s -b jar_root.txt -X POST http://127.0.0.1:13000/api/channel/ \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"mock-gemini","type":24,"base_url":"http://127.0.0.1:19999","key":"sk-gemini",
+       "models":"gemini-pro","group":"default","priority":1,"weight":1,"status":1}' > tmp_ch_gemini.json
+check "create untranslated channel" true "$(sed -n 's/.*"success":\([a-z]*\).*/\1/p;q' tmp_ch_gemini.json)"
+CODE=$(curl -s -o tmp_pass_reject.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-pro","input":"hi"}')
+check "untranslated channel refused on /v1/responses" 503 "$CODE"
+grep -q 'anthropic-messages\|openai-responses\|客户端协议' tmp_pass_reject.json \
+  && { echo "PASS: refusal names the client protocol"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_pass_reject.json)"; fail=$((fail+1)); }
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
+#     + 直通 messages 非流式(1) + 直通 messages 流式(1) = 9
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 7 ] && { echo "PASS: usage_records 7 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 9 ] && { echo "PASS: usage_records 9 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 7 ] && { echo "PASS: all 7 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 9 ] && { echo "PASS: all 9 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
 [ "$NR" = 6 ] && { echo "PASS: 6 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行恰好 1 条且计入 cache_read，写入为 0（未上报→NULL）
+# 20. §8.1 上报缓存的行 3 条：1 条 OpenAI details（3）+ 2 条 Anthropic（各 40）
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 1 ] && { echo "PASS: exactly 1 reported-cache row"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate 仅统计 reported 记录 = 3/7；coverage = 1/7
+[ "$RCC" = 3 ] && { echo "PASS: 3 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 83/107（3+40+40 命中 / 7+50+50 上报输入）；coverage = 3/9
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-3/7)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-1/7)<1e-9 and d['cache_read_input_tokens']==3
+ok=(abs(d['cache_hit_rate']-83/107)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-3/9)<1e-9 and d['cache_read_input_tokens']==83
     and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==6)
 sys.exit(0 if ok else 1)
 PY
+
+# 21b. 同一渠道在 /v1/chat/completions 上仍然可达（它靠自己的 adaptor 服务该入口）。
+#      放在用量统计之后：这次上游调用会失败，失败本身也会落一行 error usage。
+CODE=$(curl -s -o tmp_pass_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-pro","messages":[{"role":"user","content":"hi"}]}')
+if [ "$CODE" != 503 ] && ! grep -q '客户端协议' tmp_pass_chat.json; then
+  echo "PASS: untranslated channel still reachable on chat"; pass=$((pass+1))
+else
+  echo "FAIL: chat refused the channel (code=$CODE body=$(head -c 200 tmp_pass_chat.json))"; fail=$((fail+1))
+fi
 
 # 22. 工具调用贯通：三种对外格式都必须把上游的 tool_calls 完整还原
 #     mock 在请求带 tools 时返回两个并行工具调用（参数分片交错），
