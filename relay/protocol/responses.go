@@ -1,9 +1,11 @@
 package protocol
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
+	"github.com/songquanpeng/one-api/common/logger"
 	openai "github.com/songquanpeng/one-api/relay/adaptor/openai"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
@@ -83,10 +85,13 @@ func checkResponsesLimits(req *responsesRequest) *ProtocolError {
 	if req.Background != nil && *req.Background {
 		return unsupportedField("background", "不支持后台任务（background=true）")
 	}
-	// store defaults to false; store=true would require server-side persistence.
+	// store=true would require server-side response persistence, which this
+	// gateway does not provide. It is ignored rather than rejected because many
+	// clients set it by default; not persisting is harmless here since the
+	// response is always returned inline.
 	if req.Store != nil && *req.Store {
-		return unsupportedField("store",
-			"不支持 store=true（网关不做服务端响应持久化）；请保持 store=false")
+		logger.Debugf(context.Background(),
+			"responses: ignoring store=true (gateway keeps no server-side response state)")
 	}
 	return nil
 }
@@ -139,6 +144,7 @@ func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage) ([]rela
 	if err := json.Unmarshal(inputRaw, &items); err != nil {
 		return nil, invalidField("input", "input 必须是字符串或 input item 数组")
 	}
+	skipped := 0
 	for i, item := range items {
 		itemType := jsonStringOf(item, "type")
 		if itemType == "" {
@@ -168,27 +174,44 @@ func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage) ([]rela
 					ResponsesItemParam(i, "content"), "message item 的 content 数组为空")
 			}
 			messages = append(messages, relaymodel.Message{Role: role, Content: parts})
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			msg, perr := responsesFunctionCallItem(i, item)
 			if perr != nil {
 				return nil, perr
 			}
 			messages = append(messages, msg)
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
 			msg, perr := responsesFunctionCallOutputItem(i, item)
 			if perr != nil {
 				return nil, perr
 			}
 			messages = append(messages, msg)
-		case "reasoning", "item_reference", "image_generation_call", "computer_call", "computer_call_output", "web_search_call":
-			return nil, unsupportedField(ResponsesItemParam(i, "type"),
-				"第一版不支持的 input item 类型：%s", itemType)
+		case "reasoning", "item_reference", "web_search_call", "file_search_call",
+			"computer_call", "computer_call_output", "image_generation_call",
+			"code_interpreter_call", "local_shell_call", "local_shell_call_output",
+			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response":
+			// None of these can be expressed in a Chat Completions request: they
+			// are records of the model's own thinking or of server-hosted tool
+			// executions, and the chat format has no field for either. They are
+			// skipped rather than rejected, because clients replay them on every
+			// following turn — rejecting made multi-turn reasoning and web-search
+			// conversations fail outright. The drop is logged in debug mode so it
+			// is never invisible.
+			skipped++
+			logger.Debugf(context.Background(),
+				"responses: skipping input item type %q at index %d (no Chat Completions equivalent)",
+				itemType, i)
+			continue
 		default:
 			return nil, unsupportedField(ResponsesItemParam(i, "type"),
 				"未识别的 input item 类型：%s", itemType)
 		}
 	}
 	if len(messages) == 0 {
+		if skipped > 0 {
+			return nil, invalidField("input",
+				"input 只包含无法转为对话消息的条目（如 reasoning、内置工具调用等），未解析出任何消息")
+		}
 		return nil, invalidField("input", "input 未解析出任何消息")
 	}
 	return messages, nil
@@ -205,6 +228,14 @@ func responsesFunctionCallItem(i int, item map[string]json.RawMessage) (relaymod
 	}
 	arguments := "{}"
 	if raw, ok := item["arguments"]; ok {
+		if s, isStr := decodeString(raw); isStr {
+			arguments = s
+		} else {
+			arguments = string(raw)
+		}
+	} else if raw, ok := item["input"]; ok {
+		// custom_tool_call carries its free-form payload in "input" instead of
+		// the JSON "arguments" field; both map onto the chat tool_call string.
 		if s, isStr := decodeString(raw); isStr {
 			arguments = s
 		} else {
@@ -292,7 +323,17 @@ func decodeResponsesContentParts(raw json.RawMessage) ([]relaymodel.MessageConte
 				Type: relaymodel.ContentTypeText,
 				Text: jsonStringOf(part, "refusal"),
 			})
-		case "input_audio", "input_file", "encrypted_content":
+		case "encrypted_content":
+			// An opaque reasoning-state blob that accompanies an assistant turn.
+			// Chat Completions has no field for it, so it is skipped rather than
+			// rejected; only the surrounding text matters to the conversation.
+			logger.Debugf(context.Background(),
+				"responses: skipping encrypted_content part at index %d", i)
+			continue
+		case "input_audio", "input_file":
+			// These carry real user content (audio, uploaded files) that the chat
+			// format cannot represent. Refusing keeps the gateway from silently
+			// answering without the attachment the user actually sent.
 			return nil, unsupportedField("content["+itoa(i)+"].type",
 				"第一版不支持的 content part 类型：%s", pt)
 		default:
@@ -334,9 +375,15 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 			})
 			continue
 		}
-		// built-in tools (web_search, file_search, computer_use, ...) unsupported
-		return unsupportedField("tools["+itoa(i)+"].type",
-			"第一版只支持 function tools，收到：%s", tt)
+		// Hosted/built-in tools (web_search, file_search, computer_use, mcp,
+		// image_generation, code_interpreter, local_shell, custom) have no Chat
+		// Completions equivalent, so they cannot be declared to the upstream.
+		// They are dropped rather than rejected: clients such as Codex enable
+		// web_search by default, and refusing made every such request fail. The
+		// drop is visible in debug logs instead of being silent.
+		logger.Debugf(context.Background(),
+			"responses: dropping tools[%d].type=%q (no Chat Completions equivalent)", i, tt)
+		continue
 	}
 	return nil
 }
@@ -368,10 +415,15 @@ func parseResponsesToolChoice(raw json.RawMessage, normalized *relaymodel.Genera
 			},
 		}
 		return nil
-	case "allowed_tools", "hosted_tool", "mcp", "custom":
-		return unsupportedField("tool_choice.type", "第一版不支持的 tool_choice 类型：%s", tt)
 	default:
-		return unsupportedField("tool_choice.type", "未识别的 tool_choice 类型：%s", tt)
+		// Any non-function choice names a hosted tool (web_search, file_search,
+		// computer_use, mcp, image_generation, ...) that was never forwarded, so
+		// forcing a call to it would be meaningless. Leaving ToolChoice unset
+		// falls back to the upstream default (auto) instead of failing the whole
+		// request, which also avoids chasing new hosted tool names one by one.
+		logger.Debugf(context.Background(),
+			"responses: ignoring tool_choice.type=%q (not a forwarded function tool)", tt)
+		return nil
 	}
 }
 

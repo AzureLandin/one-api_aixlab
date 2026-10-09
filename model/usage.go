@@ -102,29 +102,29 @@ type UsageFilter struct {
 func (f UsageFilter) apply(tx *gorm.DB) *gorm.DB {
 	tx = tx.Table("usage_records")
 	if !f.IncludeLegacy {
-		tx = tx.Where("usage_source != ?", UsageSourceLegacy)
+		tx = tx.Where("usage_records.usage_source != ?", UsageSourceLegacy)
 	}
 	if f.UserID != nil {
-		tx = tx.Where("user_id = ?", *f.UserID)
+		tx = tx.Where("usage_records.user_id = ?", *f.UserID)
 	}
 	if f.TokenID != nil {
-		tx = tx.Where("token_id = ?", *f.TokenID)
+		tx = tx.Where("usage_records.token_id = ?", *f.TokenID)
 	}
 	if f.ChannelID != nil {
-		tx = tx.Where("channel_id = ?", *f.ChannelID)
+		tx = tx.Where("usage_records.channel_id = ?", *f.ChannelID)
 	}
 	if f.ModelName != "" {
-		tx = tx.Where("model_name = ?", f.ModelName)
+		tx = tx.Where("usage_records.model_name = ?", f.ModelName)
 	}
 	if f.Start != 0 {
-		tx = tx.Where("created_at >= ?", f.Start)
+		tx = tx.Where("usage_records.created_at >= ?", f.Start)
 	}
 	if f.End != 0 {
-		tx = tx.Where("created_at <= ?", f.End)
+		tx = tx.Where("usage_records.created_at <= ?", f.End)
 	}
 	if f.AfterCutover {
 		if cutover := GetUsageCutover(); cutover > 0 {
-			tx = tx.Where("created_at >= ?", cutover)
+			tx = tx.Where("usage_records.created_at >= ?", cutover)
 		}
 	}
 	return tx
@@ -140,6 +140,7 @@ type UsageAggRow struct {
 	TokenID             int    `gorm:"column:token_id"`
 	ModelName           string `gorm:"column:model_name"`
 	ChannelID           int    `gorm:"column:channel_id"`
+	ChannelName         string `gorm:"column:channel_name"`
 	InputTokens         int64  `gorm:"column:input_tokens"`
 	OutputTokens        int64  `gorm:"column:output_tokens"`
 	TotalTokens         int64  `gorm:"column:total_tokens"`
@@ -157,20 +158,21 @@ type UsageAggRow struct {
 
 // usageAggSelect is portable across sqlite/mysql/postgres: COALESCE and CASE
 // are supported by all three dialects in this codebase.
+// Columns are prefixed with usage_records to prevent ambiguous column errors during JOINs.
 const usageAggSelect = `
-	COALESCE(SUM(input_tokens), 0) as input_tokens,
-	COALESCE(SUM(output_tokens), 0) as output_tokens,
-	COALESCE(SUM(total_tokens), 0) as total_tokens,
-	COALESCE(SUM(request_count), 0) as request_count,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'reported' THEN cache_read_input_tokens ELSE 0 END), 0) as cache_read_tokens,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'reported' THEN cache_write_input_tokens ELSE 0 END), 0) as cache_write_tokens,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'reported' THEN input_tokens ELSE 0 END), 0) as reported_input_tokens,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'reported' THEN 1 ELSE 0 END), 0) as reported_cache_calls,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'not_reported' THEN 1 ELSE 0 END), 0) as not_reported_calls,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'invalid' THEN 1 ELSE 0 END), 0) as invalid_cache_calls,
-	COALESCE(SUM(CASE WHEN cache_usage_status = 'reported' AND cache_read_input_tokens > 0 THEN 1 ELSE 0 END), 0) as hit_calls,
-	COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as generated_calls,
-	COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as error_calls
+	COALESCE(SUM(usage_records.input_tokens), 0) as input_tokens,
+	COALESCE(SUM(usage_records.output_tokens), 0) as output_tokens,
+	COALESCE(SUM(usage_records.total_tokens), 0) as total_tokens,
+	COALESCE(SUM(usage_records.request_count), 0) as request_count,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'reported' THEN usage_records.cache_read_input_tokens ELSE 0 END), 0) as cache_read_tokens,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'reported' THEN usage_records.cache_write_input_tokens ELSE 0 END), 0) as cache_write_tokens,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'reported' THEN usage_records.input_tokens ELSE 0 END), 0) as reported_input_tokens,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'reported' THEN 1 ELSE 0 END), 0) as reported_cache_calls,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'not_reported' THEN 1 ELSE 0 END), 0) as not_reported_calls,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'invalid' THEN 1 ELSE 0 END), 0) as invalid_cache_calls,
+	COALESCE(SUM(CASE WHEN usage_records.cache_usage_status = 'reported' AND usage_records.cache_read_input_tokens > 0 THEN 1 ELSE 0 END), 0) as hit_calls,
+	COALESCE(SUM(CASE WHEN usage_records.status = 'success' THEN 1 ELSE 0 END), 0) as generated_calls,
+	COALESCE(SUM(CASE WHEN usage_records.status = 'error' THEN 1 ELSE 0 END), 0) as error_calls
 `
 
 // SummarizeUsage returns the overall aggregation for the filter.
@@ -222,7 +224,7 @@ func SummarizeUsageBy(f UsageFilter, dimension string, limit int) ([]*UsageAggRo
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	selects := col + ", " + usageAggSelect
+	selects := "usage_records." + col + ", " + usageAggSelect
 	if dimension == "by-user" {
 		// username is convenient for admin views; join is safe, column fixed.
 		selects = "usage_records.user_id as user_id, COALESCE(users.username, '') as username, " + usageAggSelect
@@ -237,9 +239,23 @@ func SummarizeUsageBy(f UsageFilter, dimension string, limit int) ([]*UsageAggRo
 			Scan(&rows).Error
 		return rows, err
 	}
+	if dimension == "by-channel" {
+		// channel_name is convenient for admin views; join is safe, column fixed.
+		selects = "usage_records.channel_id as channel_id, COALESCE(channels.name, '') as channel_name, " + usageAggSelect
+		tx := DB.Table("usage_records").
+			Joins("LEFT JOIN channels ON channels.id = usage_records.channel_id")
+		tx = f.apply(tx)
+		var rows []*UsageAggRow
+		err := tx.Select(selects).
+			Group("usage_records.channel_id, channels.name").
+			Order("total_tokens desc").
+			Limit(limit).
+			Scan(&rows).Error
+		return rows, err
+	}
 	var rows []*UsageAggRow
 	err := f.apply(DB).Select(selects).
-		Group(col).
+		Group("usage_records." + col).
 		Order("total_tokens desc").
 		Limit(limit).
 		Scan(&rows).Error

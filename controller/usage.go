@@ -117,6 +117,7 @@ func usageGrouped(c *gin.Context, dimension string) {
 			item["model_name"] = r.ModelName
 		case "by-channel":
 			item["channel_id"] = r.ChannelID
+			item["channel_name"] = r.ChannelName
 		case "by-token":
 			item["token_id"] = r.TokenID
 		}

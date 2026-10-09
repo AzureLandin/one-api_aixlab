@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
@@ -46,6 +47,68 @@ type ChannelConfig struct {
 	Plugin            string `json:"plugin,omitempty"`
 	VertexAIProjectID string `json:"vertex_ai_project_id,omitempty"`
 	VertexAIADC       string `json:"vertex_ai_adc,omitempty"`
+	// ProxyURL routes this channel's upstream calls through an outbound proxy
+	// server (http://, https://, socks5:// or socks5h://). Empty means the
+	// process-wide default transport is used, so an unconfigured channel is
+	// completely unaffected.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// ModelConfigs holds optional per-model overrides keyed by the model name
+	// (after model mapping). An absent entry — or an absent field inside an
+	// entry — means "no override": the upstream/provider default applies.
+	ModelConfigs map[string]ModelConfig `json:"model_configs,omitempty"`
+}
+
+// ModelConfig is the optional per-model override block configured on a channel.
+// Every field is optional; an unset field is never sent downstream, so the
+// model provider's own default stays in effect.
+//
+// reasoning_effort is deliberately NOT configurable here: the client's own
+// value is passed straight through to the upstream without inspection.
+type ModelConfig struct {
+	// ContextWindow is the maximum total context (input tokens) accepted for
+	// this model. 0 disables the check.
+	ContextWindow int `json:"context_window,omitempty"`
+	// MaxOutputTokens is applied as the default max_tokens when the client did
+	// not request one. 0 leaves the decision to the provider.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// InputModalities whitelists accepted input modalities ("text", "image",
+	// "audio", "file"). Empty means "no restriction".
+	InputModalities []string `json:"input_modalities,omitempty"`
+}
+
+// GetModelConfig returns the per-model override for the given model name.
+// The second result reports whether any override is present, so callers can
+// keep the untouched fast path when nothing is configured.
+func (cfg ChannelConfig) GetModelConfig(modelName string) (ModelConfig, bool) {
+	if len(cfg.ModelConfigs) == 0 || modelName == "" {
+		return ModelConfig{}, false
+	}
+	mc, ok := cfg.ModelConfigs[modelName]
+	if !ok {
+		return ModelConfig{}, false
+	}
+	return mc, !mc.IsZero()
+}
+
+// IsZero reports whether the override carries no effective setting.
+func (mc ModelConfig) IsZero() bool {
+	return mc.ContextWindow == 0 &&
+		mc.MaxOutputTokens == 0 &&
+		len(mc.InputModalities) == 0
+}
+
+// AllowsModality reports whether the given input modality is permitted. An
+// empty whitelist permits every modality.
+func (mc ModelConfig) AllowsModality(modality string) bool {
+	if len(mc.InputModalities) == 0 {
+		return true
+	}
+	for _, m := range mc.InputModalities {
+		if strings.EqualFold(m, modality) {
+			return true
+		}
+	}
+	return false
 }
 
 func GetAllChannels(startIdx int, num int, scope string) ([]*Channel, error) {

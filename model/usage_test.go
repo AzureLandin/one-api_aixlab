@@ -19,7 +19,7 @@ func setupUsageTestDB(t *testing.T) {
 	}
 	DB = db
 	common.UsingSQLite = true
-	if err := db.AutoMigrate(&Option{}, &User{}); err != nil {
+	if err := db.AutoMigrate(&Option{}, &User{}, &Channel{}); err != nil {
 		t.Fatalf("legacy tables: %v", err)
 	}
 	if err := migration.Migrate(db, "test"); err != nil {
@@ -186,6 +186,24 @@ func TestUsageAggregationRates(t *testing.T) {
 	}
 	if len(grouped) != 1 || grouped[0].ModelName != "m" {
 		t.Fatalf("unexpected by-model rows: %+v", grouped)
+	}
+
+	// by-user grouping (verifying join with users table without ambiguous column error)
+	byUser, err := SummarizeUsageBy(UsageFilter{}, "by-user", 10)
+	if err != nil {
+		t.Fatalf("by-user: %v", err)
+	}
+	if len(byUser) == 0 {
+		t.Fatalf("expected by-user rows, got 0")
+	}
+
+	// by-channel grouping (verifying join with channels table without ambiguous column error)
+	byChannel, err := SummarizeUsageBy(UsageFilter{}, "by-channel", 10)
+	if err != nil {
+		t.Fatalf("by-channel: %v", err)
+	}
+	if len(byChannel) == 0 {
+		t.Fatalf("expected by-channel rows, got 0")
 	}
 }
 

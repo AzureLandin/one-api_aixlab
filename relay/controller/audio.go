@@ -105,7 +105,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	req.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	req.Header.Set("Accept", c.Request.Header.Get("Accept"))
 
-	resp, err := client.HTTPClient.Do(req)
+	resp, err := client.RelayHTTPClient(meta.Config.ProxyURL).Do(req)
 	if err != nil {
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}

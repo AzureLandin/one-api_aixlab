@@ -31,15 +31,35 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	resp, err := DoRequest(c, req)
+	resp, err := doRequestWithMeta(c, meta, req)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
 	}
 	return resp, nil
 }
 
+// doRequestWithMeta sends the request through the client this channel requires:
+// a proxy-routed client when the channel configured an outbound proxy, or the
+// shared relay client otherwise.
+func doRequestWithMeta(c *gin.Context, meta *meta.Meta, req *http.Request) (*http.Response, error) {
+	proxyURL := ""
+	if meta != nil {
+		proxyURL = meta.Config.ProxyURL
+	}
+	return DoRequestWithClient(client.RelayHTTPClient(proxyURL), c, req)
+}
+
 func DoRequest(c *gin.Context, req *http.Request) (*http.Response, error) {
-	resp, err := client.HTTPClient.Do(req)
+	return DoRequestWithClient(client.HTTPClient, c, req)
+}
+
+// DoRequestWithClient performs the request with an explicit client and keeps the
+// shared body-closing behaviour in one place.
+func DoRequestWithClient(httpClient *http.Client, c *gin.Context, req *http.Request) (*http.Response, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -29,6 +29,9 @@ func GetStatus(c *gin.Context) {
 			"chat_link":           config.ChatLink,
 			"quota_per_unit":      config.QuotaPerUnit,
 			"display_in_currency": config.DisplayInCurrencyEnabled,
+			// Lets the sign-in UI hide the register entry instead of walking the
+			// user into a refusal; the register endpoint is public anyway.
+			"register_enabled": config.RegisterEnabled,
 		},
 	})
 	return

@@ -44,6 +44,12 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	promptTokens := getPromptTokens(textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens
 
+	// Per-model overrides configured on the channel: fill in provider defaults
+	// only where the client was silent, and enforce declared hard limits.
+	if bizErr := applyModelConfigOverrides(meta, textRequest); bizErr != nil {
+		return bizErr
+	}
+
 	adaptor := relay.GetAdaptor(meta.APIType)
 	if adaptor == nil {
 		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
@@ -107,7 +113,10 @@ func getRequestBody(c *gin.Context, meta *meta.Meta, textRequest *model.GeneralO
 		meta.APIType == apitype.OpenAI &&
 		meta.OriginModelName == meta.ActualModelName &&
 		meta.ChannelType != channeltype.Baichuan &&
-		meta.ForcedSystemPrompt == "" {
+		meta.ForcedSystemPrompt == "" &&
+		// A per-model override mutated textRequest, so the raw body can no
+		// longer be forwarded untouched.
+		!hasModelConfigOverrides(meta) {
 		// no need to convert request for openai
 		return c.Request.Body, nil
 	}

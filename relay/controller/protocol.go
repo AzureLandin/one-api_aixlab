@@ -89,6 +89,12 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 		normalized.StreamOptions = &relaymodel.StreamOptions{IncludeUsage: true}
 	}
 
+	// Per-model overrides configured on the channel, identical to the chat path.
+	if bizErr := applyModelConfigOverrides(meta, normalized); bizErr != nil {
+		recordUsage(ctx, meta, normalized, nil, relaymodel.UsageStatusError)
+		return bizErr
+	}
+
 	// Upstream capability check (§6.6): stage 3/4 supports OpenAI-compatible
 	// upstreams only; other API types are rejected explicitly, not guessed.
 	if meta.APIType != apitype.OpenAI {
