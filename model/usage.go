@@ -56,13 +56,49 @@ func (UsageRecord) TableName() string { return "usage_records" }
 
 // InsertUsageRecordOnce writes the record idempotently keyed by request_id.
 // A second call with the same request_id (retry, or stream finalize racing
-// with disconnect cleanup) is a no-op returning nil.
+// with disconnect cleanup) is a no-op returning nil — with one exception.
+//
+// A failed attempt records an "error" row, and the relay may then retry the
+// same request_id against another channel. First-write-wins would let that
+// error row stand and record a request the client saw succeed as a failure.
+// A terminal outcome (success/partial) therefore replaces an existing "error"
+// row in place: the row describes what actually happened, so it takes the
+// channel, the tokens and the time of the attempt that produced them.
 func InsertUsageRecordOnce(record *UsageRecord) error {
 	if record == nil {
 		return errors.New("usage record is nil")
 	}
 	if record.RequestID == "" {
 		return errors.New("usage record requires request_id")
+	}
+	// The UPDATE is guarded on the stored status, so exactly one writer can
+	// apply it while concurrent finalizers of the same outcome change nothing.
+	if record.Status == UsageStatusSuccess || record.Status == UsageStatusPartial {
+		result := DB.Model(&UsageRecord{}).
+			Where("request_id = ? AND status = ?", record.RequestID, UsageStatusError).
+			Updates(map[string]interface{}{
+				"user_id":                  record.UserID,
+				"token_id":                 record.TokenID,
+				"channel_id":               record.ChannelID,
+				"model_name":               record.ModelName,
+				"input_tokens":             record.InputTokens,
+				"output_tokens":            record.OutputTokens,
+				"total_tokens":             record.TotalTokens,
+				"cache_read_input_tokens":  record.CacheReadInputTokens,
+				"cache_write_input_tokens": record.CacheWriteInputTokens,
+				"request_count":            record.RequestCount,
+				"usage_source":             record.UsageSource,
+				"cache_usage_status":       record.CacheUsageStatus,
+				"stream":                   record.Stream,
+				"status":                   record.Status,
+				"created_at":               record.CreatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return nil
+		}
 	}
 	var count int64
 	if err := DB.Model(&UsageRecord{}).

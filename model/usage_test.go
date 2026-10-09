@@ -86,6 +86,131 @@ func TestInsertUsageRecordOnceIdempotent(t *testing.T) {
 	}
 }
 
+// A retry records an error row first and a success row second for the same
+// request_id. Without the upgrade the client sees a success while the table
+// says error.
+func TestInsertUsageRecordOnceUpgradesErrorToTerminal(t *testing.T) {
+	setupUsageTestDB(t)
+	failed := mkRecord("req-upgrade", 1_700_000_000)
+	failed.Status = UsageStatusError
+	failed.ChannelID = 3
+	failed.InputTokens, failed.OutputTokens, failed.TotalTokens = 0, 0, 0
+	failed.RequestCount = 0
+	failed.UsageSource = UsageSourceEstimated
+	if err := InsertUsageRecordOnce(failed); err != nil {
+		t.Fatalf("error insert: %v", err)
+	}
+
+	// The retry succeeds on a different channel, a minute later.
+	succeeded := mkRecord("req-upgrade", 1_700_000_060)
+	succeeded.ChannelID = 9
+	succeeded.TotalTokens = 120
+	if err := InsertUsageRecordOnce(succeeded); err != nil {
+		t.Fatalf("success insert: %v", err)
+	}
+
+	var rows []UsageRecord
+	if err := DB.Where("request_id = ?", "req-upgrade").Find(&rows).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row, got %d", len(rows))
+	}
+	got := rows[0]
+	if got.Status != UsageStatusSuccess {
+		t.Errorf("status = %q, want %q", got.Status, UsageStatusSuccess)
+	}
+	if got.ChannelID != 9 {
+		t.Errorf("channel_id = %d, want 9 — the attempt that produced the usage", got.ChannelID)
+	}
+	if got.InputTokens != 100 || got.OutputTokens != 20 || got.TotalTokens != 120 {
+		t.Errorf("tokens = %d/%d/%d, want 100/20/120",
+			got.InputTokens, got.OutputTokens, got.TotalTokens)
+	}
+	if got.UsageSource != UsageSourceReported {
+		t.Errorf("usage_source = %q, want %q", got.UsageSource, UsageSourceReported)
+	}
+	if got.CreatedAt != 1_700_000_060 {
+		t.Errorf("created_at = %d, want 1700000060 (the recorded outcome)", got.CreatedAt)
+	}
+}
+
+func TestInsertUsageRecordOnceDoesNotDowngradeTerminal(t *testing.T) {
+	setupUsageTestDB(t)
+	if err := InsertUsageRecordOnce(mkRecord("req-down", 1_700_000_000)); err != nil {
+		t.Fatalf("success insert: %v", err)
+	}
+	// A later failing attempt must not erase the outcome already recorded.
+	late := mkRecord("req-down", 1_700_000_060)
+	late.Status = UsageStatusError
+	late.TotalTokens = 0
+	if err := InsertUsageRecordOnce(late); err != nil {
+		t.Fatalf("late error insert: %v", err)
+	}
+
+	var got UsageRecord
+	if err := DB.Where("request_id = ?", "req-down").First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Status != UsageStatusSuccess {
+		t.Errorf("status = %q, want the first recorded %q", got.Status, UsageStatusSuccess)
+	}
+	if got.TotalTokens != 120 {
+		t.Errorf("total_tokens = %d, want 120 (unchanged)", got.TotalTokens)
+	}
+}
+
+// Repeating a terminal outcome is still idempotent: the first one stands and no
+// second row appears.
+func TestInsertUsageRecordOnceRepeatedTerminalKeepsFirst(t *testing.T) {
+	setupUsageTestDB(t)
+	if err := InsertUsageRecordOnce(mkRecord("req-repeat", 1_700_000_000)); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	second := mkRecord("req-repeat", 1_700_000_060)
+	second.TotalTokens = 999
+	if err := InsertUsageRecordOnce(second); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	var count int64
+	DB.Model(&UsageRecord{}).Where("request_id = ?", "req-repeat").Count(&count)
+	if count != 1 {
+		t.Fatalf("want 1 row, got %d", count)
+	}
+	var got UsageRecord
+	DB.Where("request_id = ?", "req-repeat").First(&got)
+	if got.TotalTokens != 120 {
+		t.Errorf("total_tokens = %d, want 120 (the first outcome stands)", got.TotalTokens)
+	}
+}
+
+// An error row is only replaced by a terminal outcome, never by another error.
+func TestInsertUsageRecordOnceRepeatedErrorKeepsFirst(t *testing.T) {
+	setupUsageTestDB(t)
+	first := mkRecord("req-err2", 1_700_000_000)
+	first.Status = UsageStatusError
+	first.ChannelID = 3
+	if err := InsertUsageRecordOnce(first); err != nil {
+		t.Fatalf("first error: %v", err)
+	}
+	second := mkRecord("req-err2", 1_700_000_060)
+	second.Status = UsageStatusError
+	second.ChannelID = 9
+	if err := InsertUsageRecordOnce(second); err != nil {
+		t.Fatalf("second error: %v", err)
+	}
+
+	var rows []UsageRecord
+	DB.Where("request_id = ?", "req-err2").Find(&rows)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row, got %d", len(rows))
+	}
+	if rows[0].ChannelID != 3 {
+		t.Errorf("channel_id = %d, want 3 (first error stands)", rows[0].ChannelID)
+	}
+}
+
 func TestUsageAggregationRates(t *testing.T) {
 	setupUsageTestDB(t)
 	day1 := int64(1_700_000_000) // 2023-11-14
