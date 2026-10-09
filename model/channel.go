@@ -56,6 +56,14 @@ type ChannelConfig struct {
 	// (after model mapping). An absent entry — or an absent field inside an
 	// entry — means "no override": the upstream/provider default applies.
 	ModelConfigs map[string]ModelConfig `json:"model_configs,omitempty"`
+	// UpstreamProtocol declares the wire protocol this channel's upstream
+	// actually speaks ("openai-chat", "openai-responses",
+	// "anthropic-messages" or "compatible"). Empty means "derive it from the
+	// channel type". It is validated when the channel is saved: a typo is
+	// rejected rather than silently treated as openai-chat, which would take
+	// the translation path and drop the native fields (cache_control, thinking,
+	// hosted tools) that same-protocol passthrough preserves.
+	UpstreamProtocol string `json:"upstream_protocol,omitempty"`
 }
 
 // ModelConfig is the optional per-model override block configured on a channel.
