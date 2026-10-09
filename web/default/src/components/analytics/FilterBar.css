@@ -1,0 +1,43 @@
+.app-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  background-color: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-md);
+  padding: 10px 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.filter-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-label {
+  font-size: 0.85rem;
+  color: var(--app-text-muted);
+  font-weight: 500;
+}
+
+.filter-range-dropdown {
+  min-width: 130px !important;
+  background: var(--app-surface-raised) !important;
+  border: 1px solid var(--app-border) !important;
+  color: var(--app-text) !important;
+  padding: 8px 12px !important;
+}
+
+.filter-refresh-btn {
+  border-color: var(--app-border) !important;
+  color: var(--app-text-muted) !important;
+}
+
+.filter-refresh-btn:hover {
+  border-color: var(--app-border-strong) !important;
+  color: var(--app-text) !important;
+}

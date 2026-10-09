@@ -1,0 +1,8 @@
+.git
+.npmcache
+.gocache
+web/default/node_modules
+scripts/smoke/tiktoken
+scripts/smoke/*.log
+scripts/smoke/*.dump
+*.log

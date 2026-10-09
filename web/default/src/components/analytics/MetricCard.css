@@ -1,0 +1,77 @@
+.app-metric-card {
+  background-color: var(--app-surface) !important;
+  border: 1px solid var(--app-border) !important;
+  border-radius: var(--app-radius-md) !important;
+  box-shadow: none !important;
+  transition: border-color 0.15s ease;
+}
+
+.app-metric-card:hover {
+  border-color: var(--app-border-strong) !important;
+}
+
+.metric-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.metric-label-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.metric-icon {
+  color: var(--app-text-subtle) !important;
+  font-size: 0.95rem !important;
+}
+
+.metric-label {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--app-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metric-hint-icon {
+  color: var(--app-text-subtle) !important;
+  cursor: pointer;
+}
+
+.metric-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.metric-value {
+  font-size: 1.65rem;
+  font-weight: 700;
+  color: var(--app-text);
+  font-family: var(--app-font-sans);
+  letter-spacing: -0.02em;
+}
+
+.metric-unit {
+  font-size: 0.85rem;
+  color: var(--app-text-muted);
+}
+
+.metric-desc {
+  font-size: 0.78rem;
+  color: var(--app-text-subtle);
+  margin-top: 6px;
+}
+
+.app-metric-card.status-success .metric-value {
+  color: var(--app-success);
+}
+.app-metric-card.status-warning .metric-value {
+  color: var(--app-warning);
+}
+.app-metric-card.status-danger .metric-value {
+  color: var(--app-danger);
+}

@@ -1,0 +1,86 @@
+.app-sidebar {
+  position: fixed;
+  top: var(--app-topbar-height);
+  left: 0;
+  bottom: 0;
+  width: var(--app-sidebar-width);
+  background-color: var(--app-canvas);
+  border-right: 1px solid var(--app-border);
+  overflow-y: auto;
+  padding: 16px 8px;
+  z-index: 900;
+  transition: transform 0.2s ease;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.nav-group-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--app-text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 8px 6px 8px;
+}
+
+.nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--app-radius-sm);
+  color: var(--app-text-muted);
+  text-decoration: none;
+  font-size: 0.88rem;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.nav-item:hover {
+  background-color: var(--app-surface-hover);
+  color: var(--app-text);
+}
+
+.nav-item.active {
+  background-color: var(--app-surface-raised);
+  color: var(--app-text);
+  border-left: 2px solid var(--app-accent);
+}
+
+.nav-item-icon {
+  font-size: 1rem !important;
+  color: var(--app-text-subtle);
+}
+
+.nav-item.active .nav-item-icon {
+  color: var(--app-accent);
+}
+
+@media screen and (max-width: 768px) {
+  .app-sidebar {
+    transform: translateX(-100%);
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+  }
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+  .sidebar-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.6);
+    z-index: 899;
+  }
+}

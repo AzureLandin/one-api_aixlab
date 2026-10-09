@@ -1,0 +1,148 @@
+:root,
+[data-theme='dark'] {
+  --app-bg: #141414;
+  --app-canvas: #181818;
+  --app-surface: #202020;
+  --app-surface-raised: #282828;
+  --app-surface-hover: #303030;
+  
+  --app-text: #f0f0f0;
+  --app-text-muted: #a6a6a6;
+  --app-text-subtle: #737373;
+  --app-text-disabled: #525252;
+  
+  --app-border: rgba(255, 255, 255, 0.10);
+  --app-border-strong: rgba(255, 255, 255, 0.18);
+  --app-border-subtle: rgba(255, 255, 255, 0.06);
+
+  --app-accent: #3b82f6;
+  --app-accent-hover: #60a5fa;
+  --app-accent-subtle: rgba(59, 130, 246, 0.15);
+  
+  --app-success: #10b981;
+  --app-success-subtle: rgba(16, 185, 129, 0.15);
+  --app-warning: #f59e0b;
+  --app-warning-subtle: rgba(245, 158, 11, 0.15);
+  --app-danger: #ef4444;
+  --app-danger-subtle: rgba(239, 68, 68, 0.15);
+  
+  --app-radius-xs: 3px;
+  --app-radius-sm: 4px;
+  --app-radius-md: 6px;
+  --app-radius-lg: 8px;
+
+  --app-topbar-height: 56px;
+  --app-sidebar-width: 220px;
+  --app-sidebar-collapsed-width: 64px;
+
+  --app-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --app-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* 全局深色底色与字体 */
+body {
+  margin: 0;
+  background-color: var(--app-bg) !important;
+  color: var(--app-text) !important;
+  font-family: var(--app-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 恢复默认可见滚动条，且采用深色高雅样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--app-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--app-surface-raised);
+  border-radius: var(--app-radius-xs);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--app-text-subtle);
+}
+
+/* Semantic UI 暗色系原生补丁 - 规避默认白底 */
+.ui.segment {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border) !important;
+  box-shadow: none !important;
+  border-radius: var(--app-radius-md) !important;
+}
+
+.ui.card, .ui.cards > .card {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border) !important;
+  box-shadow: none !important;
+  border-radius: var(--app-radius-md) !important;
+}
+
+.ui.card .header, .ui.card .meta, .ui.card .description {
+  color: var(--app-text) !important;
+}
+.ui.card .meta {
+  color: var(--app-text-muted) !important;
+}
+
+.ui.table {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border) !important;
+}
+.ui.table th {
+  background: var(--app-surface-raised) !important;
+  color: var(--app-text-muted) !important;
+  border-bottom: 1px solid var(--app-border) !important;
+  border-top: none !important;
+}
+.ui.table td {
+  border-top: 1px solid var(--app-border-subtle) !important;
+  color: var(--app-text) !important;
+}
+.ui.selectable.table tbody tr:hover {
+  background: var(--app-surface-hover) !important;
+  color: var(--app-text) !important;
+}
+
+.ui.input input, .ui.form input[type="text"], .ui.form input[type="password"], .ui.form input[type="email"], .ui.form textarea {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border) !important;
+  border-radius: var(--app-radius-sm) !important;
+}
+.ui.input input:focus, .ui.form input:focus, .ui.form textarea:focus {
+  border-color: var(--app-accent) !important;
+}
+
+.ui.dropdown {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border) !important;
+}
+.ui.dropdown .menu {
+  background: var(--app-surface-raised) !important;
+  border: 1px solid var(--app-border-strong) !important;
+}
+.ui.dropdown .menu > .item {
+  color: var(--app-text) !important;
+  border-top: 1px solid var(--app-border-subtle) !important;
+}
+.ui.dropdown .menu > .item:hover {
+  background: var(--app-surface-hover) !important;
+}
+
+.ui.modal {
+  background: var(--app-surface) !important;
+  border: 1px solid var(--app-border-strong) !important;
+  color: var(--app-text) !important;
+}
+.ui.modal > .header, .ui.modal > .content, .ui.modal > .actions {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border-color: var(--app-border) !important;
+}

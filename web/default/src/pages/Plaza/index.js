@@ -12,7 +12,6 @@ import {
 } from 'semantic-ui-react';
 import { API, copy, showError, showSuccess } from '../../helpers';
 import { getChannelOption } from '../../helpers/helper';
-import '../Dashboard/Dashboard.css';
 
 const Plaza = () => {
   const { t } = useTranslation();

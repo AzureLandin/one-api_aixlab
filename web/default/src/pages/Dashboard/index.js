@@ -1,15 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useTranslation } from 'react-i18next';
-import {
-  Card,
-  Grid,
-  Dropdown,
-  Button,
-  Icon,
-  Message,
-  Table,
-  Label,
-} from 'semantic-ui-react';
+import { Grid, Table, Label } from 'semantic-ui-react';
 import {
   Bar,
   BarChart,
@@ -22,33 +12,26 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { API, isAdmin } from '../../helpers';
+import { isAdmin } from '../../helpers';
 import { renderNumber } from '../../helpers/render';
-import './Dashboard.css';
+import { getUsageSummary, getUsageTrend, getUsageRanking } from '../../services/usage';
 
-const chartColors = ['#4318FF', '#00B5D8', '#6C63FF', '#05CD99', '#FFB547', '#FF5E7D'];
+// 共享组件引入
+import PageHeader from '../../components/layout/PageHeader';
+import MetricCard from '../../components/analytics/MetricCard';
+import RateMetric from '../../components/analytics/RateMetric';
+import ChartPanel from '../../components/analytics/ChartPanel';
+import FilterBar from '../../components/analytics/FilterBar';
+import DataQualityNotice from '../../components/analytics/DataQualityNotice';
+import PageState from '../../components/states/PageState';
 
-// fmtRate renders a nullable ratio as a percentage, or a dash when the metric
-// is not computable (unreported cache data must NOT show as 0% — §13).
-function fmtRate(v) {
-  if (v === null || v === undefined) return '—';
-  return (v * 100).toFixed(1) + '%';
-}
-
-const RANGE_OPTIONS = [
-  { key: '7', value: 7, text: 'range.7d' },
-  { key: '30', value: 30, text: 'range.30d' },
-  { key: '90', value: 90, text: 'range.90d' },
-  { key: '0', value: 0, text: 'range.all' },
-];
+const chartColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
 
 const Dashboard = () => {
-  const { t } = useTranslation();
   const admin = isAdmin();
-  const base = admin ? '/api/usage' : '/api/usage/self';
-
   const [days, setDays] = useState(7);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(false);
   const [denied, setDenied] = useState(false);
 
@@ -56,29 +39,33 @@ const Dashboard = () => {
   const [trend, setTrend] = useState([]);
   const [byModel, setByModel] = useState([]);
 
-  const rangeParams = useCallback(() => {
-    if (days === 0) return '';
+  const computeTimeRange = useCallback(() => {
+    if (days === 0) return {};
     const end = Math.floor(Date.now() / 1000);
     const start = end - days * 86400;
-    return `?start_timestamp=${start}&end_timestamp=${end}`;
+    return { start_timestamp: start, end_timestamp: end };
   }, [days]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
     setError(false);
     setDenied(false);
+
+    const filters = computeTimeRange();
+
     try {
-      const q = rangeParams();
       const [sumRes, trendRes] = await Promise.all([
-        API.get(`${base}/summary${q}`),
-        API.get(`${base}/trend${q}`),
+        getUsageSummary(filters),
+        getUsageTrend(filters),
       ]);
-      if (sumRes.data.success) setSummary(sumRes.data.data);
-      if (trendRes.data.success) setTrend(trendRes.data.data || []);
+
+      if (sumRes.success) setSummary(sumRes.data);
+      if (trendRes.success) setTrend(trendRes.data || []);
 
       if (admin) {
-        const byRes = await API.get(`${base}/by-model${q ? q + '&limit=8' : '?limit=8'}`);
-        if (byRes.data.success) setByModel(byRes.data.data || []);
+        const byRes = await getUsageRanking('model', { ...filters, limit: 8 });
+        if (byRes.success) setByModel(byRes.data || []);
       } else {
         setByModel([]);
       }
@@ -86,234 +73,197 @@ const Dashboard = () => {
       const status = e?.response?.status;
       if (status === 401 || status === 403) setDenied(true);
       else setError(true);
-      setSummary(null);
-      setTrend([]);
-      setByModel([]);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, [base, admin, rangeParams]);
+  }, [admin, computeTimeRange]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadData();
+  }, [loadData]);
 
-  const trendData = trend.map((r) => ({
-    date: r.day,
-    tokens: r.summary.total_tokens,
-    requests: r.summary.request_count,
-    cache_read: r.summary.cache_read_input_tokens,
-  }));
+  if (loading && !summary) {
+    return <PageState type="loading" title="正在加载用量数据..." />;
+  }
 
-  const modelData = byModel.map((r) => ({
-    name: r.model_name,
-    tokens: r.summary.total_tokens,
-  }));
+  if (denied) {
+    return <PageState type="forbidden" title="无权访问" message="您当前无权查看该用量看板统计" />;
+  }
 
-  const cacheReported = summary && (summary.cache_hit_rate !== null || summary.not_reported_cache_calls === 0);
+  if (error && !summary) {
+    return (
+      <PageState
+        type="error"
+        title="数据加载失败"
+        message="无法连接至用量统计服务，请检查网络后重试"
+        onRetry={() => loadData(false)}
+      />
+    );
+  }
 
   return (
-    <div className='dashboard-container'>
-      {/* toolbar: range + refresh */}
-      <Card fluid className='chart-card'>
-        <Card.Content>
-          <Grid stackable columns='equal'>
-            <Grid.Column width={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span style={{ fontWeight: 600 }}>{t('dashboard.title')}</span>
-                <Dropdown
-                  selection
-                  value={days}
-                  options={RANGE_OPTIONS.map((o) => ({ ...o, text: t(`dashboard.${o.text}`) }))}
-                  onChange={(_, { value }) => setDays(value)}
-                />
-              </div>
-            </Grid.Column>
-            <Grid.Column width={6} textAlign='right'>
-              <Button icon labelPosition='left' primary onClick={load} loading={loading}>
-                <Icon name='refresh' />
-                {t('dashboard.refresh')}
-              </Button>
-            </Grid.Column>
-          </Grid>
-        </Card.Content>
-      </Card>
+    <div className="dashboard-container">
+      <PageHeader
+        title="总览看板"
+        description="实时监控系统 Token 消耗事实与 Prompt Caching 缓存效率"
+      />
 
-      {denied && (
-        <Message negative>
-          <Message.Header>{t('dashboard.error.no_permission')}</Message.Header>
-        </Message>
-      )}
-      {error && (
-        <Message negative>
-          <Message.Header>{t('dashboard.error.load')}</Message.Header>
-        </Message>
-      )}
-
-      {loading && !summary && (
-        <Card fluid className='chart-card'>
-          <Card.Content>
-            <Icon loading name='spinner' /> {t('dashboard.loading')}
-          </Card.Content>
-        </Card>
-      )}
+      <FilterBar
+        days={days}
+        onChangeDays={setDays}
+        onRefresh={() => loadData(true)}
+        loading={refreshing}
+      />
 
       {summary && (
         <>
-          {/* token overview */}
-          <Grid columns={4} stackable className='charts-grid'>
-            <StatCard label={t('dashboard.cards.total_tokens')} value={renderNumber(summary.total_tokens)} />
-            <StatCard label={t('dashboard.cards.input_tokens')} value={renderNumber(summary.input_tokens)} />
-            <StatCard label={t('dashboard.cards.output_tokens')} value={renderNumber(summary.output_tokens)} />
-            <StatCard label={t('dashboard.cards.requests')} value={renderNumber(summary.request_count)} />
-          </Grid>
-
-          {/* cache three-metric cards (§9.2) */}
-          <Grid columns={3} stackable className='charts-grid'>
+          {/* Token 概览卡片 */}
+          <div className="metric-cards-grid">
             <MetricCard
-              t={t}
-              label={t('dashboard.cache.hit_rate')}
-              value={fmtRate(summary.cache_hit_rate)}
-              hint={t('dashboard.cache.hit_rate_hint')}
-              reported={cacheReported}
+              label="总 Token"
+              value={renderNumber(summary.total_tokens || 0)}
+              icon="pie chart"
+              description="全部请求生成与输入的 Token 总和"
             />
             <MetricCard
-              t={t}
-              label={t('dashboard.cache.call_hit_rate')}
-              value={fmtRate(summary.call_hit_rate)}
-              hint={t('dashboard.cache.call_hit_rate_hint')}
-              reported={cacheReported}
+              label="输入 Token"
+              value={renderNumber(summary.input_tokens || 0)}
+              icon="arrow down"
+              description="用户输入的 Prompt Token（含缓存读取）"
             />
             <MetricCard
-              t={t}
-              label={t('dashboard.cache.coverage')}
-              value={fmtRate(summary.cache_coverage)}
-              hint={t('dashboard.cache.coverage_hint', {
-                reported: summary.not_reported_cache_calls,
-              })}
-              reported={cacheReported}
+              label="输出 Token"
+              value={renderNumber(summary.output_tokens || 0)}
+              icon="arrow up"
+              description="模型生成的 Completion Token"
             />
-          </Grid>
+            <MetricCard
+              label="请求调用次数"
+              value={renderNumber(summary.request_count || 0)}
+              icon="server"
+              description="成功与处理完成的请求总数"
+            />
+          </div>
 
-          {summary.not_reported_cache_calls > 0 && (
-            <Message info>
-              {t('dashboard.cache.unreported_notice', {
-                count: summary.not_reported_cache_calls,
-              })}
-            </Message>
-          )}
+          {/* 缓存三指标卡片（§13 重点验收项：null 显示为 "—"，绝不当 0%） */}
+          <div className="metric-cards-grid" style={{ marginTop: '14px' }}>
+            <RateMetric
+              label="Token 缓存命中率"
+              value={summary.cache_hit_rate}
+              hint="Σ 缓存读取 Token / Σ 已报告缓存调用的输入 Token"
+              description={`已读取: ${renderNumber(summary.cache_read_input_tokens || 0)} Token`}
+              status={summary.cache_hit_rate !== null ? 'success' : 'default'}
+              icon="shield"
+            />
+            <RateMetric
+              label="调用缓存命中率"
+              value={summary.call_hit_rate}
+              hint="命中缓存的调用次数 / 已报告缓存的成功调用总数"
+              description="按次统计产生缓存读取的请求比例"
+              status={summary.call_hit_rate !== null ? 'success' : 'default'}
+              icon="crosshairs"
+            />
+            <RateMetric
+              label="缓存报告覆盖率"
+              value={summary.cache_coverage}
+              hint="已报告缓存数据的调用次数 / 全部生成调用总数"
+              description="上游模型适配器上报 Prompt Caching 的比例"
+              status={summary.cache_coverage !== null ? 'warning' : 'default'}
+              icon="check circle outline"
+            />
+            <MetricCard
+              label="缓存写入 Token"
+              value={renderNumber(summary.cache_write_input_tokens || 0)}
+              icon="write"
+              description="首次创建或更新上下文缓存的 Token 数"
+            />
+          </div>
 
-          {/* trend */}
-          <Card fluid className='chart-card'>
-            <Card.Content>
-              <Card.Header>{t('dashboard.charts.tokens.title')}</Card.Header>
-              <div className='chart-container'>
-                <ResponsiveContainer width='100%' height={260}>
-                  <LineChart data={trendData}>
-                    <CartesianGrid strokeDasharray='3 3' vertical={false} opacity={0.1} />
-                    <XAxis dataKey='date' axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#A3AED0' }} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#A3AED0' }} />
-                    <Tooltip />
-                    <Legend />
-                    <Line type='monotone' dataKey='tokens' stroke={chartColors[0]} strokeWidth={2} dot={false}
-                      name={t('dashboard.charts.tokens.tooltip')} />
-                    <Line type='monotone' dataKey='cache_read' stroke={chartColors[3]} strokeWidth={2} dot={false}
-                      name={t('dashboard.cache.read')} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </Card.Content>
-          </Card>
+          <DataQualityNotice summary={summary} />
 
-          {/* by-model ranking (admin only) */}
-          {admin && (
-            <Card fluid className='chart-card'>
-              <Card.Content>
-                <Card.Header>{t('dashboard.ranking.by_model')}</Card.Header>
-                {modelData.length === 0 ? (
-                  <Message>{t('dashboard.empty')}</Message>
-                ) : (
-                  <>
-                    <div className='chart-container'>
-                      <ResponsiveContainer width='100%' height={240}>
-                        <BarChart data={modelData}>
-                          <CartesianGrid strokeDasharray='3 3' vertical={false} opacity={0.1} />
-                          <XAxis dataKey='name' axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#A3AED0' }} />
-                          <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#A3AED0' }} />
-                          <Tooltip />
-                          <Bar dataKey='tokens' fill={chartColors[0]} radius={[4, 4, 0, 0]}
-                            name={t('dashboard.charts.tokens.tooltip')} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <Table celled style={{ overflowX: 'auto' }}>
+          {/* 趋势图 */}
+          <ChartPanel
+            title="Token 用量每日趋势"
+            subtitle="输入、输出与缓存读取历史趋势对比"
+            empty={!trend || trend.length === 0}
+          >
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart data={trend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--app-border)" />
+                <XAxis dataKey="date" stroke="var(--app-text-muted)" />
+                <YAxis stroke="var(--app-text-muted)" tickFormatter={(v) => renderNumber(v)} />
+                <Tooltip
+                  formatter={(v) => renderNumber(v)}
+                  contentStyle={{ backgroundColor: 'var(--app-surface-raised)', borderColor: 'var(--app-border-strong)', color: 'var(--app-text)' }}
+                />
+                <Legend />
+                <Line type="monotone" dataKey="total_tokens" name="总 Token" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="input_tokens" name="输入 Token" stroke="#10b981" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="output_tokens" name="输出 Token" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="cache_read_tokens" name="缓存读取" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartPanel>
+
+          {/* 管理员专属排行面板 */}
+          {admin && byModel && byModel.length > 0 && (
+            <ChartPanel
+              title="模型用量分布 (Top 8)"
+              subtitle="按模型消耗聚合分析及缓存命中表现"
+            >
+              <Grid columns={2} stackable>
+                <Grid.Column width={10}>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart data={byModel}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--app-border)" />
+                      <XAxis dataKey="model_name" stroke="var(--app-text-muted)" />
+                      <YAxis stroke="var(--app-text-muted)" tickFormatter={(v) => renderNumber(v)} />
+                      <Tooltip
+                        formatter={(v) => renderNumber(v)}
+                        contentStyle={{ backgroundColor: 'var(--app-surface-raised)', borderColor: 'var(--app-border-strong)', color: 'var(--app-text)' }}
+                      />
+                      <Legend />
+                      <Bar dataKey="input_tokens" name="输入 Token" fill="#10b981" stackId="a" />
+                      <Bar dataKey="output_tokens" name="输出 Token" fill="#f59e0b" stackId="a" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Grid.Column>
+                <Grid.Column width={6}>
+                  <div className="table-scroll">
+                    <Table basic="very" inverted compact size="small">
                       <Table.Header>
                         <Table.Row>
-                          <Table.HeaderCell>{t('dashboard.table.model')}</Table.HeaderCell>
-                          <Table.HeaderCell>{t('dashboard.cards.total_tokens')}</Table.HeaderCell>
-                          <Table.HeaderCell>{t('dashboard.cards.requests')}</Table.HeaderCell>
-                          <Table.HeaderCell>{t('dashboard.cache.hit_rate')}</Table.HeaderCell>
-                          <Table.HeaderCell>{t('dashboard.cache.coverage')}</Table.HeaderCell>
+                          <Table.HeaderCell>模型名称</Table.HeaderCell>
+                          <Table.HeaderCell textAlign="right">总 Token</Table.HeaderCell>
+                          <Table.HeaderCell textAlign="right">命中率</Table.HeaderCell>
                         </Table.Row>
                       </Table.Header>
                       <Table.Body>
-                        {byModel.map((r, i) => (
-                          <Table.Row key={i}>
-                            <Table.Cell>{r.model_name}</Table.Cell>
-                            <Table.Cell>{renderNumber(r.summary.total_tokens)}</Table.Cell>
-                            <Table.Cell>{renderNumber(r.summary.request_count)}</Table.Cell>
+                        {byModel.map((item, idx) => (
+                          <Table.Row key={item.model_name || idx}>
                             <Table.Cell>
-                              {fmtRate(r.summary.cache_hit_rate)}
-                              {r.summary.cache_hit_rate === null && (
-                                <Label basic size='mini' style={{ marginLeft: 6 }}>{t('dashboard.cache.na')}</Label>
-                              )}
+                              <span style={{ fontFamily: 'var(--app-font-mono)' }}>{item.model_name}</span>
                             </Table.Cell>
-                            <Table.Cell>{fmtRate(r.summary.cache_coverage)}</Table.Cell>
+                            <Table.Cell textAlign="right">{renderNumber(item.total_tokens)}</Table.Cell>
+                            <Table.Cell textAlign="right">
+                              <Label size="tiny" basic color={item.cache_hit_rate > 0 ? 'green' : 'grey'}>
+                                {item.cache_hit_rate !== null ? `${(item.cache_hit_rate * 100).toFixed(1)}%` : '—'}
+                              </Label>
+                            </Table.Cell>
                           </Table.Row>
                         ))}
                       </Table.Body>
                     </Table>
-                  </>
-                )}
-              </Card.Content>
-            </Card>
+                  </div>
+                </Grid.Column>
+              </Grid>
+            </ChartPanel>
           )}
         </>
-      )}
-
-      {!loading && summary && summary.request_count === 0 && (
-        <Message>{t('dashboard.empty')}</Message>
       )}
     </div>
   );
 };
-
-const StatCard = ({ label, value }) => (
-  <Grid.Column>
-    <Card fluid className='chart-card'>
-      <Card.Content>
-        <Card.Meta>{label}</Card.Meta>
-        <div style={{ fontSize: '1.8rem', fontWeight: 700, marginTop: '6px' }}>{value}</div>
-      </Card.Content>
-    </Card>
-  </Grid.Column>
-);
-
-const MetricCard = ({ t, label, value, hint, reported }) => (
-  <Grid.Column>
-    <Card fluid className='chart-card'>
-      <Card.Content>
-        <Card.Meta>{label}</Card.Meta>
-        <div style={{ fontSize: '1.8rem', fontWeight: 700, margin: '6px 0' }}>{value}</div>
-        <Card.Description style={{ fontSize: '0.8rem', color: '#888' }}>{hint}</Card.Description>
-        {!reported && (
-          <Label size='mini' basic color='grey' style={{ marginTop: '6px' }}>
-            {t('dashboard.cache.not_reported')}
-          </Label>
-        )}
-      </Card.Content>
-    </Card>
-  </Grid.Column>
-);
 
 export default Dashboard;

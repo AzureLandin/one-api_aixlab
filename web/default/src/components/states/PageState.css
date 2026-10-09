@@ -1,0 +1,47 @@
+.app-page-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  padding: 40px 16px;
+}
+
+.page-state-card {
+  max-width: 420px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.page-state-icon {
+  color: var(--app-text-subtle) !important;
+  margin-bottom: 16px !important;
+}
+
+.page-state-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--app-text);
+  margin: 0 0 8px 0;
+}
+
+.page-state-desc {
+  font-size: 0.88rem;
+  color: var(--app-text-muted);
+  margin: 0 0 20px 0;
+  line-height: 1.5;
+}
+
+.page-state-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.state-error .page-state-icon {
+  color: var(--app-danger) !important;
+}
+
+.state-forbidden .page-state-icon {
+  color: var(--app-warning) !important;
+}

@@ -1,0 +1,24 @@
+.data-quality-notice {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quality-message {
+  margin: 0 !important;
+  background-color: var(--app-surface-raised) !important;
+  border: 1px solid var(--app-border) !important;
+  border-radius: var(--app-radius-sm) !important;
+  color: var(--app-text) !important;
+  display: flex !important;
+  align-items: center !important;
+}
+
+.quality-message.info {
+  border-left: 3px solid var(--app-accent) !important;
+}
+
+.quality-message.warning {
+  border-left: 3px solid var(--app-warning) !important;
+}

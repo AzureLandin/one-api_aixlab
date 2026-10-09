@@ -271,7 +271,7 @@ const UsersTable = () => {
                       size='mini'
                       basic
                       as={Link}
-                      to={`/console/usage?user_id=${user.id}`}
+                      to={`/usage?user_id=${user.id}`}
                       title={t('user.table.usage_entry')}
                     >
                       {t('user.table.usage_entry')}

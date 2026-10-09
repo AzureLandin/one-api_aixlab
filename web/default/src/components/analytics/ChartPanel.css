@@ -1,0 +1,53 @@
+.app-chart-panel {
+  background-color: var(--app-surface) !important;
+  border: 1px solid var(--app-border) !important;
+  border-radius: var(--app-radius-md) !important;
+  box-shadow: none !important;
+  margin-top: 16px !important;
+}
+
+.chart-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.chart-panel-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--app-text);
+  margin: 0;
+}
+
+.chart-panel-subtitle {
+  font-size: 0.8rem;
+  color: var(--app-text-muted);
+  margin: 4px 0 0 0;
+}
+
+.chart-panel-body {
+  min-height: 280px;
+  position: relative;
+}
+
+.chart-panel-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+  color: var(--app-text-muted);
+}
+
+.chart-panel-state.empty-state {
+  color: var(--app-text-subtle);
+  gap: 12px;
+}
+
+.chart-panel-state.empty-state p {
+  margin: 0;
+  font-size: 0.9rem;
+}

@@ -1,0 +1,119 @@
+.app-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-topbar-height);
+  background-color: var(--app-canvas);
+  border-bottom: 1px solid var(--app-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mobile-menu-trigger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--app-text);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--app-text);
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.topbar-logo {
+  height: 24px;
+  width: auto;
+}
+
+.topbar-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.breadcrumb-separator {
+  color: var(--app-text-subtle);
+}
+
+.breadcrumb-current {
+  color: var(--app-text-muted);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.topbar-lang-dropdown,
+.topbar-user-dropdown {
+  color: var(--app-text-muted) !important;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.topbar-lang-dropdown:hover,
+.topbar-user-dropdown:hover {
+  color: var(--app-text) !important;
+}
+
+.user-profile-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.auth-btn {
+  font-size: 0.85rem;
+  padding: 6px 12px;
+  border-radius: var(--app-radius-sm);
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.login-btn {
+  color: var(--app-text-muted);
+}
+.login-btn:hover {
+  color: var(--app-text);
+}
+
+.register-btn {
+  background: var(--app-surface-raised);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+}
+.register-btn:hover {
+  background: var(--app-surface-hover);
+  border-color: var(--app-border-strong);
+}
+
+@media screen and (max-width: 768px) {
+  .mobile-menu-trigger {
+    display: block;
+  }
+  .topbar-breadcrumb {
+    display: none;
+  }
+}

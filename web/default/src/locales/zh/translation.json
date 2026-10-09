@@ -12,7 +12,10 @@
     "chat": "聊天",
     "login": "登录",
     "logout": "注销",
-    "register": "注册"
+    "register": "注册",
+    "usage": "用量分析",
+    "logout_success": "注销成功!",
+    "profile": "个人信息"
   },
   "plaza": {
     "title": "模型广场",
@@ -641,6 +644,15 @@
       "password_length": "密码长度不得小于 8 位！",
       "password_mismatch": "两次输入的密码不一致",
       "root_password": "请立刻修改默认密码！"
+    }
+  },
+  "usage": {
+    "title": "用量分析",
+    "desc": "Token 事实层分析与多维排行",
+    "ranking": {
+      "model": "模型排行",
+      "user": "用户排行",
+      "channel": "渠道排行"
     }
   }
 }

@@ -1,0 +1,25 @@
+.console-layout {
+  min-height: 100vh;
+  background-color: var(--app-bg);
+  color: var(--app-text);
+}
+
+.console-main {
+  margin-top: var(--app-topbar-height);
+  margin-left: var(--app-sidebar-width);
+  min-height: calc(100vh - var(--app-topbar-height));
+  background-color: var(--app-bg);
+  padding: 24px;
+}
+
+.console-content {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+@media screen and (max-width: 768px) {
+  .console-main {
+    margin-left: 0;
+    padding: 16px 12px;
+  }
+}

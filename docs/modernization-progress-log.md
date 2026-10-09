@@ -300,3 +300,40 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
 
 **总门禁**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l`（relay model middleware controller router model/migration）✅ 空 · `go test`（排除存量红 `common/image`）12 包 ✅ · 端到端冒烟 `pass=45 fail=0` ✅ · 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+
+---
+
+## 阶段 7：前端第二轮现代化改造（参考 SHUAI API 深色开发者控制台）
+
+依据 `docs/frontend-modernization-plan.md` 与 `docs/frontend-modernization-implementation.md` 执行前端体验现代化提升。
+
+### 核心实施内容
+
+1. **F0（基线与请求安全）**：
+   - 记录 `git status` 与 `npm test` 存量状态。
+   - `web/default/src/helpers/api.js`：Axios response interceptor 在 `showError` 后补充 `return Promise.reject(error)`，使页面能准确捕获 401、403 与网络中断。
+   - 权限守卫：`PrivateRoute.js` 扩展支持 `requiredRole`，普通用户访问受限路由自动回退并保留 `state.from`。
+   - 路由元数据：新建 `src/routes/routeMeta.js`，集中维护标题、权限分级和导航归属。
+   - 事实层服务：新建 `src/services/usage.js`，严格区分管理员与 self 范围，保留可空指标 `null` 规范。
+
+2. **F1（设计变量与三套布局）**：
+   - 建立 `src/styles/theme.css`：定义 `--app-bg` (#141414)、`--app-canvas`、`--app-surface`、细边框体系与低圆角规范。
+   - 布局解耦：
+     - `ConsoleLayout`（固定 Topbar + 桌面侧边栏 / 移动端抽屉 + 主滚动区域）。
+     - `PublicLayout`（首页/关于页等公共页，保留轻量页脚）。
+     - `AuthLayout`（登录/注册/重置密码窄屏居中容器）。
+   - 样式治理：清理 `index.css` 侵入式 `body padding-top` 与隐藏滚动条代码，恢复可见深色滚动条。
+
+3. **F2（统计分析与深链接）**：
+   - 抽取统计共享组件：`MetricCard`、`RateMetric`（null 恒为“—”）、`ChartPanel`、`FilterBar`、`DataQualityNotice`、`PageState`。
+   - 重构 `Dashboard/index.js`，清理全局外溢样式 `Dashboard.css`。
+   - 新建 `src/pages/Usage/index.js`：支持多时间范围过滤、`user_id` 管理员精准筛选、URL 深链接自动同步，以及模型/用户/渠道三维度细分排行 Tab。
+
+4. **F3 / F4（页面规范与 i18n/a11y）**：
+   - `UsersTable`：修复 `/console/usage?user_id=...` 死链，更新为指向 `/usage?user_id=...`，并在 `App.js` 中保留兼容重定向路由。
+   - 清理 Plaza 等页面对 `Dashboard.css` 的非预期样式依赖。
+   - 完善中英文翻译字典，更新 Topbar/Sidebar 导航术语。
+
+5. **F5（验证与验收）**：
+   - 前端构建验证：`npm run build` 成功通过（exit 0），无新增 warning。
+   - 容器热更新验证：打包最新 Docker 镜像并部署，验证主站根路径、`/usage` 路由与 API 正常加载。
