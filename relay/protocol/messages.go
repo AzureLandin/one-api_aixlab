@@ -83,6 +83,7 @@ func ParseMessages(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolErro
 		}
 		normalized.Messages = append(normalized.Messages, msgs...)
 	}
+	backfillToolResultNames(normalized.Messages)
 
 	if perr := parseMessagesTools(req.Tools, normalized); perr != nil {
 		return nil, perr
@@ -132,20 +133,31 @@ func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]
 	}
 
 	var (
-		out       []relaymodel.Message
-		curText   []relaymodel.MessageContent
-		curCalls  []relaymodel.Tool
-		flushText = func() {
-			if len(curText) > 0 {
-				out = append(out, relaymodel.Message{Role: role, Content: normalizeContentPayload(curText)})
-				curText = nil
+		out      []relaymodel.Message
+		curText  []relaymodel.MessageContent
+		curCalls []relaymodel.Tool
+		// flush emits whatever the current Anthropic turn accumulated. Text and
+		// tool_use blocks of one assistant turn belong to ONE OpenAI message:
+		// splitting them into a text-only message followed by a tool-calls-only
+		// message inserts a second assistant turn the client never sent, and the
+		// upstream then rejects the tool_result that follows.
+		flush = func() {
+			if len(curText) == 0 && len(curCalls) == 0 {
+				return
 			}
-		}
-		flushCalls = func() {
+			msg := relaymodel.Message{}
 			if len(curCalls) > 0 {
-				out = append(out, relaymodel.Message{Role: "assistant", ToolCalls: curCalls})
-				curCalls = nil
+				msg.Role = "assistant"
+				msg.ToolCalls = curCalls
+			} else {
+				msg.Role = role
 			}
+			if len(curText) > 0 {
+				msg.Content = normalizeContentPayload(curText)
+			}
+			out = append(out, msg)
+			curText = nil
+			curCalls = nil
 		}
 	)
 	for j, blk := range blocks {
@@ -163,15 +175,13 @@ func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]
 			}
 			curText = append(curText, ic)
 		case "tool_result":
-			flushText()
-			flushCalls()
+			flush()
 			msg, perr := decodeMessagesToolResult(i, j, blk)
 			if perr != nil {
 				return nil, perr
 			}
 			out = append(out, msg)
 		case "tool_use":
-			flushText()
 			if role != "assistant" {
 				return nil, invalidField(paramBlock(i, j), "tool_use 只能出现在 assistant 消息中")
 			}
@@ -186,8 +196,7 @@ func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]
 			return nil, unsupportedField(paramBlock(i, j), "未识别的 content block 类型：%s", bt)
 		}
 	}
-	flushText()
-	flushCalls()
+	flush()
 	if len(out) == 0 {
 		return nil, invalidField("messages["+itoa(i)+"].content", "content block 数组未解析出任何内容")
 	}
@@ -269,6 +278,38 @@ func decodeMessagesToolResult(i, j int, blk map[string]json.RawMessage) (relaymo
 	return relaymodel.Message{Role: "tool", ToolCallId: toolUseID, Content: content}, nil
 }
 
+// backfillToolResultNames fills in the function name on role:"tool" messages.
+// Anthropic's tool_result block carries only tool_use_id, but the OpenAI Chat
+// protocol asks the tool message to name the function as well, and strict
+// OpenAI-compatible upstreams reject a multi-turn tool conversation without it.
+// The name is recovered from the tool_use block that issued the call, which is
+// why this runs over the finished list rather than per message.
+func backfillToolResultNames(messages []relaymodel.Message) {
+	toolNames := map[string]string{}
+	for _, msg := range messages {
+		for _, tc := range msg.ToolCalls {
+			if tc.Id == "" || tc.Function.Name == "" {
+				continue
+			}
+			if _, exists := toolNames[tc.Id]; !exists {
+				toolNames[tc.Id] = tc.Function.Name
+			}
+		}
+	}
+	if len(toolNames) == 0 {
+		return
+	}
+	for i := range messages {
+		msg := &messages[i]
+		if msg.Role != "tool" || msg.Name != nil {
+			continue
+		}
+		if name, ok := toolNames[msg.ToolCallId]; ok {
+			msg.Name = &name
+		}
+	}
+}
+
 func decodeMessagesToolUse(i, j int, blk map[string]json.RawMessage) (relaymodel.Tool, *ProtocolError) {
 	id := jsonStringOf(blk, "id")
 	name := jsonStringOf(blk, "name")
@@ -334,6 +375,16 @@ func parseMessagesToolChoice(raw json.RawMessage, normalized *relaymodel.General
 	default:
 		return unsupportedField("tool_choice.type", "未识别的 tool_choice 类型：%s", jsonStringOf(m, "type"))
 	}
+	// Anthropic expresses "do not run tool calls in parallel" inside tool_choice;
+	// OpenAI expresses it as its own top-level flag. Dropping it let the upstream
+	// return parallel calls the client had explicitly refused.
+	if raw, ok := m["disable_parallel_tool_use"]; ok {
+		var disabled bool
+		if err := json.Unmarshal(raw, &disabled); err == nil && disabled {
+			no := false
+			normalized.ParallelTooCalls = &no
+		}
+	}
 	return nil
 }
 
@@ -350,6 +401,8 @@ func finishReasonToStopReason(finish string) *string {
 		s = "tool_use"
 	case "stop_sequence":
 		s = "stop_sequence"
+	case "content_filter":
+		s = "refusal"
 	case "":
 		return nil
 	default:
@@ -363,7 +416,7 @@ func finishReasonToStopReason(finish string) *string {
 // Usage only has input/output tokens.
 func RenderMessages(upstream *openai.TextResponse, model string) map[string]any {
 	content := []map[string]any{}
-	var stopReason *string
+	stopReason := "end_turn"
 	if len(upstream.Choices) > 0 {
 		choice := upstream.Choices[0]
 		if text := choice.Message.StringContent(); text != "" {
@@ -380,7 +433,16 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 				"input": argumentsToInput(tc.Function.Arguments),
 			})
 		}
-		stopReason = finishReasonToStopReason(choice.FinishReason)
+		if mapped := finishReasonToStopReason(choice.FinishReason); mapped != nil {
+			stopReason = *mapped
+		}
+		// A turn that produced tool calls stopped for tool use, whatever
+		// finish_reason the upstream left behind (some leave it empty);
+		// reporting end_turn would tell the client the model is done and orphan
+		// the tool_use blocks. A `length` stop is kept: the call was truncated.
+		if len(choice.Message.ToolCalls) > 0 && stopReason == "end_turn" {
+			stopReason = "tool_use"
+		}
 	}
 
 	id := "msg_" + strings.TrimPrefix(upstream.Id, "chatcmpl-")
@@ -396,26 +458,39 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 			"output_tokens": upstream.Usage.CompletionTokens,
 		},
 	}
-	if stopReason == nil {
-		envelope["stop_reason"] = nil
-	}
 	return envelope
 }
 
+// argumentsToInput turns the accumulated argument string of a tool call into the
+// object Anthropic expects for tool_use.input. Anything that is not a JSON
+// object becomes an empty object: `input` must be an object, and leaking the raw
+// text under a synthetic key would hand the client a field its schema never
+// declared.
 func argumentsToInput(args any) any {
+	empty := map[string]any{}
 	switch v := args.(type) {
 	case nil:
-		return map[string]any{}
+		return empty
 	case string:
 		if strings.TrimSpace(v) == "" {
-			return map[string]any{}
+			return empty
 		}
-		var m any
-		if err := json.Unmarshal([]byte(v), &m); err == nil {
-			return m
+		var m map[string]any
+		if err := json.Unmarshal([]byte(v), &m); err != nil || m == nil {
+			return empty
 		}
-		return map[string]any{"_raw": v}
-	default:
+		return m
+	case map[string]any:
 		return v
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return empty
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+			return empty
+		}
+		return m
 	}
 }

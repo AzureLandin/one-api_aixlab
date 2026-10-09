@@ -149,7 +149,7 @@ func TestRenderMessages_Text(t *testing.T) {
 	if len(content) != 1 || content[0]["type"] != "text" || content[0]["text"] != "hello there" {
 		t.Fatalf("content wrong: %+v", content)
 	}
-	if env["stop_reason"] != nil && *(env["stop_reason"].(*string)) != "end_turn" {
+	if env["stop_reason"] != "end_turn" {
 		t.Fatalf("stop_reason wrong: %v", env["stop_reason"])
 	}
 	usage := env["usage"].(map[string]int)
@@ -180,8 +180,7 @@ func TestRenderMessages_ToolUseAndStopReason(t *testing.T) {
 	if !ok || input["x"] != float64(1) {
 		t.Fatalf("input not parsed from arguments: %+v", content[0]["input"])
 	}
-	sr, ok := env["stop_reason"].(*string)
-	if !ok || *sr != "tool_use" {
+	if env["stop_reason"] != "tool_use" {
 		t.Fatalf("stop_reason should be tool_use: %v", env["stop_reason"])
 	}
 }
@@ -191,9 +190,9 @@ func TestRenderMessages_LengthMapsToMaxTokens(t *testing.T) {
 		Choices: []openai.TextResponseChoice{{FinishReason: "length", Message: relaymodel.Message{Content: "x"}}},
 	}
 	env := RenderMessages(up, "claude")
-	sr := *(env["stop_reason"].(*string))
+	sr := env["stop_reason"]
 	if sr != "max_tokens" {
-		t.Fatalf("stop_reason = %s", sr)
+		t.Fatalf("stop_reason = %v", sr)
 	}
 }
 

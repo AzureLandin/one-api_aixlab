@@ -207,6 +207,11 @@ func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage) ([]rela
 				"未识别的 input item 类型：%s", itemType)
 		}
 	}
+	// A Responses function_call_output names only the call_id; the role:"tool"
+	// message it becomes still has to name the function for strict
+	// OpenAI-compatible upstreams, and the function_call item in the same input
+	// list is where that name comes from.
+	backfillToolResultNames(messages)
 	if len(messages) == 0 {
 		if skipped > 0 {
 			return nil, invalidField("input",
@@ -365,13 +370,22 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 	for i, tool := range tools {
 		tt := jsonStringOf(tool, "type")
 		if tt == "function" {
+			fn := relaymodel.Function{
+				Name:        jsonStringOf(tool, "name"),
+				Description: jsonStringOf(tool, "description"),
+				Parameters:  anyOf(tool, "parameters"),
+			}
+			// strict is a plain boolean in the Responses protocol, so it is read
+			// directly rather than through the OpenAI-style nested shape.
+			if raw, ok := tool["strict"]; ok {
+				var strict bool
+				if err := json.Unmarshal(raw, &strict); err == nil {
+					fn.Strict = &strict
+				}
+			}
 			normalized.Tools = append(normalized.Tools, relaymodel.Tool{
-				Type: "function",
-				Function: relaymodel.Function{
-					Name:        jsonStringOf(tool, "name"),
-					Description: jsonStringOf(tool, "description"),
-					Parameters:  anyOf(tool, "parameters"),
-				},
+				Type:     "function",
+				Function: fn,
 			})
 			continue
 		}
@@ -462,10 +476,17 @@ func RenderResponses(upstream *openai.TextResponse, model string) map[string]any
 			"status":  "completed",
 			"content": content,
 		})
-		for _, tc := range choice.Message.ToolCalls {
+		for i, tc := range choice.Message.ToolCalls {
+			// new-api keys the output item by the upstream call id itself, so a
+			// client can match item_id and call_id without translation; an
+			// unidentified call falls back to a response-scoped id.
+			itemID := tc.Id
+			if itemID == "" {
+				itemID = responseID(upstream.Id) + "_call_" + itoa(i)
+			}
 			output = append(output, map[string]any{
 				"type":      "function_call",
-				"id":        "fc_" + tc.Id,
+				"id":        itemID,
 				"call_id":   tc.Id,
 				"name":      tc.Function.Name,
 				"arguments": toolArgumentsToString(tc.Function.Arguments),
