@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -87,6 +86,19 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 		return relayPassthrough(c, meta, entry, body)
 	}
 
+	// Different protocol: a codec translates in both directions (§6.6). The
+	// lookup happens before the request is parsed because a protocol no codec
+	// speaks is refused on the client's own terms, and because the answer does
+	// not depend on the parsed form.
+	codec, codecErr := upstreamCodecFor(meta, upstreamProtocol, entry)
+	if codecErr != nil {
+		modelName, stream := nativeRequestMeta(body)
+		meta.ActualModelName = modelName
+		meta.IsStream = stream
+		recordUsage(ctx, meta, modelName, nil, relaymodel.UsageStatusError)
+		return codecErr
+	}
+
 	normalized, perr := entry.Parse(body)
 	if perr != nil {
 		// Request never became a usable generation; nothing to record.
@@ -130,15 +142,16 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	}
 	adaptor.Init(meta)
 
-	// Rewrite the request as a canonical OpenAI /v1/chat/completions call.
-	requestBody, err := json.Marshal(normalized)
+	// Rewrite the request in the upstream's own protocol: a chat completion for a
+	// chat upstream, a Messages call for an Anthropic one.
+	requestBody, requestPath, err := codec.RequestBody(meta, normalized)
 	if err != nil {
 		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
 	}
 	savedPath := meta.RequestURLPath
-	meta.RequestURLPath = "/v1/chat/completions"
-	resp, err := adaptor.DoRequest(c, meta, bytes.NewReader(requestBody))
+	meta.RequestURLPath = requestPath
+	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	meta.RequestURLPath = savedPath
 	if err != nil {
 		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
@@ -150,10 +163,10 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	}
 
 	if meta.IsStream {
-		return relayProtocolStream(c, ctx, meta, entry, normalized, resp, systemPromptReset)
+		return relayProtocolStream(c, ctx, meta, entry, normalized, resp, codec, systemPromptReset)
 	}
 
-	textResponse, usage, readErr := readOpenAIUsage(resp, meta)
+	textResponse, usage, readErr := codec.NonStreamResponse(meta, resp)
 	if readErr != nil {
 		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return readErr
@@ -167,24 +180,25 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	return nil
 }
 
-// relayProtocolStream reads the upstream OpenAI SSE stream, mirrors it into
-// protocol-typed events, and finalizes usage exactly once — including the
-// client-disconnect -> partial case (§7.1-7.3).
+// relayProtocolStream reads the upstream stream through the channel's codec,
+// renders it into protocol-typed events, and finalizes usage exactly once —
+// including the client-disconnect -> partial case (§7.1-7.3). Which upstream
+// protocol produced the chunks is the codec's business: by the time they reach
+// here they are the normalized chat.completion.chunk framing every renderer
+// reads.
 func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entry *protocolEntry,
-	normalized *relaymodel.GeneralOpenAIRequest, resp *http.Response, systemPromptReset bool) *relaymodel.ErrorWithStatusCode {
+	normalized *relaymodel.GeneralOpenAIRequest, resp *http.Response, codec upstreamCodec,
+	systemPromptReset bool) *relaymodel.ErrorWithStatusCode {
 
 	sse.SetEventStreamHeaders(c.Writer)
 	writer := sse.NewWriter(c.Writer)
-	reader := sse.NewReader(resp.Body)
-	state := sse.NewState()
+	source := codec.Stream(m, resp)
 	respID := "resp_" + helper.GetRequestID(ctx)
 	// Prompt-side estimate is known up front (from getPromptTokens); it seeds
 	// message_start input_tokens for protocols that report it there. Output
 	// tokens and the authoritative usage are finalized at stream end.
 	promptSeed := &relaymodel.Usage{PromptTokens: m.PromptTokens}
 	stream := entry.NewStream(writer, respID, m.ActualModelName, promptSeed)
-
-	counter := func(text, model string) int { return openai.CountTokenText(text, model) }
 
 	aborted := false
 	for {
@@ -193,7 +207,7 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 			aborted = true
 			break
 		}
-		ev, err := reader.Next()
+		chunk, err := source.Next()
 		if err == io.EOF {
 			break
 		}
@@ -202,17 +216,6 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 			aborted = true
 			break
 		}
-		if aerr := state.Absorb(ev); aerr != nil {
-			// Malformed chunk: skip typed re-emit, keep accumulating; do not swallow.
-			continue
-		}
-		if ev.IsDone() {
-			break
-		}
-		chunk, perr := sse.ParseChunk(ev.Data)
-		if perr != nil {
-			continue
-		}
 		if werr := stream.Chunk(chunk); werr != nil {
 			// write failure -> client gone
 			aborted = true
@@ -220,26 +223,23 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 		}
 	}
 
-	usage := state.FinalizeUsage(m.PromptTokens, m.ActualModelName, counter)
-	status := state.TerminalStatus(aborted)
+	outcome := source.Finalize(aborted)
 
 	// Surface upstream errors and terminal frames to the client, not swallow.
-	switch status {
+	switch outcome.Status {
 	case relaymodel.UsageStatusError:
-		var e relaymodel.Error
-		if state.UpstreamError != nil {
-			e = *state.UpstreamError
-		} else {
-			e = relaymodel.Error{Message: "upstream stream error", Type: "server_error"}
+		e := relaymodel.Error{Message: "upstream stream error", Type: "server_error"}
+		if outcome.Error != nil {
+			e = *outcome.Error
 		}
 		_ = stream.Error(e)
 	default:
-		_ = stream.Finish(state.FinishReason, usage)
+		_ = stream.Finish(outcome.FinishReason, outcome.Usage)
 	}
 
 	_ = resp.Body.Close()
-	recordUsage(ctx, m, normalized.Model, usage, status)
-	go recordConsumeLog(ctx, usage, m, normalized.Model, systemPromptReset)
+	recordUsage(ctx, m, normalized.Model, outcome.Usage, outcome.Status)
+	go recordConsumeLog(ctx, outcome.Usage, m, normalized.Model, systemPromptReset)
 	return nil
 }
 

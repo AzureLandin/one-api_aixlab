@@ -248,20 +248,34 @@ type messagesMirror struct {
 	// (§7.2 reported / estimated / nil ladder).
 	inputReported  bool
 	outputReported bool
-	// text is the completion as seen on the wire, used only for the local
-	// estimate when the upstream never reported the output side.
-	text        strings.Builder
+	// usageText is the response as seen on the wire, used only for the local
+	// estimate when the upstream never reported the output side. Tool-call
+	// arguments are counted too: an upstream that streams a large call and no
+	// text would otherwise be recorded as a handful of tokens (the same reason
+	// sse.StreamState.ResponseTextForUsage counts them).
+	usageText   strings.Builder
 	terminal    bool
 	upstreamErr *relaymodel.Error
 }
 
-func (mir *messagesMirror) observe(ev sse.Event) {
+// observe folds one Anthropic SSE event into the mirror and returns it in the
+// adaptor's own StreamResponse shape, for callers that have to render it (the
+// translated codec does; the passthrough does not, because it mirrors the
+// upstream's bytes). ok is false for an event with no JSON payload at all — a
+// keep-alive or a proxy's own frame — which is not an error: such an event was
+// carried to the client and contributes nothing here.
+func (mir *messagesMirror) observe(ev sse.Event) (*anthropic.StreamResponse, bool) {
+	// The shape carries every field a caller may need, not only the ones the
+	// mirror accumulates: content_block and index are what the adaptor's
+	// converter reads to announce a tool call.
 	var raw struct {
-		Type    string              `json:"type"`
-		Message *anthropic.Response `json:"message"`
-		Delta   *anthropic.Delta    `json:"delta"`
-		Usage   *anthropic.Usage    `json:"usage"`
-		Error   *struct {
+		Type         string              `json:"type"`
+		Message      *anthropic.Response `json:"message"`
+		Index        int                 `json:"index"`
+		ContentBlock *anthropic.Content  `json:"content_block"`
+		Delta        *anthropic.Delta    `json:"delta"`
+		Usage        *anthropic.Usage    `json:"usage"`
+		Error        *struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"error"`
@@ -269,7 +283,7 @@ func (mir *messagesMirror) observe(ev sse.Event) {
 	if err := json.Unmarshal([]byte(ev.Data), &raw); err != nil {
 		// Not a JSON event (a keep-alive or a proxy's own frame). It was mirrored
 		// to the client regardless; there is nothing to accumulate.
-		return
+		return nil, false
 	}
 
 	// The type lives in the `event:` frame and, redundantly, in the payload.
@@ -303,18 +317,23 @@ func (mir *messagesMirror) observe(ev sse.Event) {
 		// message_delta: the terminal, cumulative output count.
 		mir.outputReported = true
 	}
+	parsed := &anthropic.StreamResponse{
+		Type:         eventType,
+		Message:      raw.Message,
+		Index:        raw.Index,
+		ContentBlock: raw.ContentBlock,
+		Delta:        raw.Delta,
+		Usage:        raw.Usage,
+	}
 	// One shared accumulation rule with the chat adaptor's StreamHandler —
 	// output_tokens is assigned, never added (see anthropic.AccumulateStreamUsage).
-	anthropic.AccumulateStreamUsage(&mir.usage, &anthropic.StreamResponse{
-		Type:    eventType,
-		Message: raw.Message,
-		Delta:   raw.Delta,
-		Usage:   raw.Usage,
-	})
+	anthropic.AccumulateStreamUsage(&mir.usage, parsed)
 
 	if raw.Delta != nil {
-		mir.text.WriteString(raw.Delta.Text)
+		mir.usageText.WriteString(raw.Delta.Text)
+		mir.usageText.WriteString(raw.Delta.PartialJson)
 	}
+	return parsed, true
 }
 
 // status mirrors sse.StreamState.TerminalStatus: an upstream error event wins, a
@@ -333,7 +352,12 @@ func (mir *messagesMirror) status(aborted bool) string {
 // reported / estimated / nil ladder the OpenAI path uses (§7.2). A stream that
 // reported only its input side is labelled estimated as a whole: a mixed row
 // must not claim that its numbers came from the upstream.
-func (mir *messagesMirror) finalizeUsage(modelName string) *relaymodel.Usage {
+//
+// promptFallback is the gateway's own estimate of the prompt, used only when the
+// upstream never reported the input side. The passthrough has no normalized
+// request to count one from and passes 0 — an invented number would be worse
+// than a gap — while the translated codec passes the estimate it does have.
+func (mir *messagesMirror) finalizeUsage(modelName string, promptFallback int) *relaymodel.Usage {
 	switch {
 	case mir.outputReported:
 		u := mir.usage
@@ -341,13 +365,16 @@ func (mir *messagesMirror) finalizeUsage(modelName string) *relaymodel.Usage {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 		relaymodel.NormalizeUsage(&u)
 		return &u
-	case mir.inputReported || mir.text.Len() > 0:
+	case mir.inputReported || mir.usageText.Len() > 0:
+		prompt := mir.usage.PromptTokens
+		if prompt == 0 {
+			prompt = promptFallback
+		}
 		u := relaymodel.Usage{
-			// The prompt side is kept when message_start reported it; it stays 0
-			// when nothing did, because this path has no normalized request to
-			// count it from and inventing a number would be worse than a gap.
-			PromptTokens:          mir.usage.PromptTokens,
-			CompletionTokens:      openai.CountTokenText(mir.text.String(), modelName),
+			// The prompt side is what the upstream reported, or the caller's own
+			// estimate when it reported nothing.
+			PromptTokens:          prompt,
+			CompletionTokens:      openai.CountTokenText(mir.usageText.String(), modelName),
 			CacheReadInputTokens:  mir.usage.CacheReadInputTokens,
 			CacheWriteInputTokens: mir.usage.CacheWriteInputTokens,
 			Source:                relaymodel.UsageSourceEstimated,
@@ -410,7 +437,9 @@ func relayMessagesPassthroughStream(c *gin.Context, m *meta.Meta, projected *pro
 	}
 
 	status := mirror.status(aborted)
-	usage := mirror.finalizeUsage(m.ActualModelName)
+	// No prompt fallback: this path never built a normalized request, so there is
+	// no local prompt estimate to fall back to.
+	usage := mirror.finalizeUsage(m.ActualModelName, 0)
 	recordUsage(ctx, m, projected.Model, usage, status)
 	go recordConsumeLog(ctx, usage, m, projected.Model, projected.SystemPromptReset)
 	return nil

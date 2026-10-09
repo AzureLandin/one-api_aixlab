@@ -238,7 +238,7 @@ func TestMessagesMirrorReportedStream(t *testing.T) {
 	if status := mir.status(false); status != relaymodel.UsageStatusSuccess {
 		t.Fatalf("status = %s, want success", status)
 	}
-	u := mir.finalizeUsage("claude")
+	u := mir.finalizeUsage("claude", 0)
 	if u == nil {
 		t.Fatal("usage is nil, want a reported fact")
 	}
@@ -273,7 +273,7 @@ func TestMessagesMirrorInterruptedStreamIsPartialAndEstimated(t *testing.T) {
 	if status := mir.status(true); status != relaymodel.UsageStatusPartial {
 		t.Fatalf("status = %s, want partial", status)
 	}
-	u := mir.finalizeUsage("claude")
+	u := mir.finalizeUsage("claude", 0)
 	if u == nil {
 		t.Fatal("usage is nil, want an estimated fact")
 	}
@@ -308,7 +308,7 @@ func TestMessagesMirrorErrorEventIsError(t *testing.T) {
 		t.Fatalf("upstream error not captured: %+v", mir.upstreamErr)
 	}
 	// Nothing was reported, so there is no usage fact to invent.
-	if u := mir.finalizeUsage("claude"); u != nil {
+	if u := mir.finalizeUsage("claude", 0); u != nil {
 		t.Fatalf("usage = %+v, want nil when nothing was reported", u)
 	}
 }

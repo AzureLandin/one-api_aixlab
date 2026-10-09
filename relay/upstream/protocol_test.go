@@ -35,8 +35,9 @@ func TestResolveDerivesFromAPIType(t *testing.T) {
 	}{
 		{apitype.OpenAI, OpenAIChat},
 		{apitype.Anthropic, AnthropicMessages},
-		// Bedrock's Claude models take the same Messages wire shape.
-		{apitype.AwsClaude, AnthropicMessages},
+		// Bedrock speaks the Messages body shape but not over HTTP, so it is not
+		// a protocol entry point the gateway can serve — see TestResolve.
+		{apitype.AwsClaude, Unsupported},
 	}
 	for _, tc := range cases {
 		if got := Resolve("", tc.apiType); got != tc.want {

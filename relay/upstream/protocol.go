@@ -36,14 +36,21 @@ const (
 // value wins; otherwise the protocol is derived from the api type; an api type
 // outside the translated families resolves to Unsupported.
 //
+// Bedrock is Unsupported even though its Claude models take the same Messages
+// body: the request never travels as an HTTP Messages call, it goes through the
+// SDK's InvokeModel with a Bedrock-shaped envelope. A channel that resolves to a
+// protocol the gateway only speaks on some other transport would be picked for
+// protocol requests it cannot serve (the filter in model.channelServesClient)
+// and then fail after the fact. It keeps working on /v1/chat/completions
+// through its own adaptor, which is what Unsupported promises.
+//
 // configured is ChannelConfig.UpstreamProtocol and apiType is meta.APIType.
 func Resolve(configured string, apiType int) Protocol {
 	if configured != "" {
 		return Protocol(configured)
 	}
 	switch apiType {
-	case apitype.Anthropic, apitype.AwsClaude:
-		// Bedrock's Claude models take the same Messages wire shape.
+	case apitype.Anthropic:
 		return AnthropicMessages
 	case apitype.OpenAI:
 		return OpenAIChat

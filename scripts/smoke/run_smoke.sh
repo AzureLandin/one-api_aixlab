@@ -294,30 +294,83 @@ CODE=$(curl -s -o tmp_pass_reject.json -w '%{http_code}' -X POST http://127.0.0.
 check "untranslated channel refused on /v1/responses" 503 "$CODE"
 grep -q 'anthropic-messages\|openai-responses\|客户端协议' tmp_pass_reject.json \
   && { echo "PASS: refusal names the client protocol"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_pass_reject.json)"; fail=$((fail+1)); }
+
+# 16e. 跨协议翻译格子：/v1/responses 客户端 → anthropic-messages 上游
+#      同一个 mock-anthropic 渠道，但客户端说的是另一种协议，所以走 codec 而不是直通：
+#      请求经 anthropic.ConvertRequest 改写为 Messages 体，响应经 ResponseClaude2OpenAI /
+#      StreamResponseClaude2OpenAI 折回规范化 TextResponse/chunk，再由 Responses 渲染器
+#      包成 response.* 信封。放在 16c-3 之后——这些请求同样会覆盖 mock_last_messages.json。
+#      已知有损：thinking 块在 OpenAI 归一化形态里没有槽位，本格丢弃（与既有 chat pivot
+#      同）；下面的断言反过来把这个损失钉住——输出里只应出现 text 块的内容。
+CODE=$(curl -s -o tmp_xlate_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"claude-mock-sonnet","input":"hi","max_output_tokens":64}')
+check "cross-protocol responses→anthropic 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: responses envelope from a translated Anthropic body"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_xlate_resp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_xlate_resp.json'))
+items=d.get('output') or []
+content=(items[0].get('content') if items else None) or []
+u=d.get('usage') or {}
+ok=(d.get('object')=='response' and d.get('status')=='completed'
+    and [i.get('type') for i in items]==['message']
+    and [p.get('text') for p in content]==['ok']
+    and (u.get('input_tokens'),u.get('output_tokens'),u.get('total_tokens'))==(50,12,62))
+sys.exit(0 if ok else 1)
+PY
+# 上游收到的是 Messages 体（转换后的形态），不是客户端自己的 Responses 体
+python3 - <<'PY' && { echo "PASS: codec rewrote the body into the Messages shape"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_messages.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_messages.json'))['body'] or {}
+ok=(b.get('model')=='claude-upstream-actual' and isinstance(b.get('messages'),list)
+    and isinstance(b.get('max_tokens'),int) and 'input' not in b and 'instructions' not in b)
+sys.exit(0 if ok else 1)
+PY
+
+# 16e-1 流式：Anthropic SSE 被翻成规范化 chunk，再由 Responses 渲染器发 response.* 事件
+curl -s -N -D tmp_xlate_resp_sse.h -o tmp_xlate_resp_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"claude-mock-sonnet","input":"hi","max_output_tokens":64,"stream":true}'
+grep -qi 'text/event-stream' tmp_xlate_resp_sse.h \
+  && { echo "PASS: cross-protocol responses stream content-type"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_xlate_resp_sse.h)"; fail=$((fail+1)); }
+grep -q 'event: response.output_text.delta' tmp_xlate_resp_sse.txt \
+  && grep -q 'event: response.completed' tmp_xlate_resp_sse.txt \
+  && { echo "PASS: translated Anthropic stream renders response.* events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '"delta":"o"' tmp_xlate_resp_sse.txt && grep -q '"delta":"k"' tmp_xlate_resp_sse.txt \
+  && { echo "PASS: cross-protocol deltas not concatenated"; pass=$((pass+1)); } || { echo "FAIL: $(tail -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '"input_tokens":50' tmp_xlate_resp_sse.txt && grep -q '"output_tokens":12' tmp_xlate_resp_sse.txt \
+  && { echo "PASS: cross-protocol stream reported usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(tail -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
+# 用量事实与直通路径落在同一组数字上：同一份上游响应，镜像与翻译不得各记一套
+sleep 1
+XU=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=50 and output_tokens=12 and total_tokens=62 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
+[ "$XU" = 4 ] && { echo "PASS: translated rows match the mirrored ones (4 = 2 mirror + 2 codec)"; pass=$((pass+1)); } || { echo "FAIL: matching anthropic rows=$XU (want 4)"; fail=$((fail+1)); }
+
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
 #     + 直通 messages 非流式(1) + 直通 messages 流式(1) = 9
+#     + 跨协议 responses→anthropic 非流式(1) + 流式(1) = 11
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 9 ] && { echo "PASS: usage_records 9 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 11 ] && { echo "PASS: usage_records 11 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 9 ] && { echo "PASS: all 9 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 11 ] && { echo "PASS: all 11 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
+#     跨协议格子的两条都上报了缓存，所以计数不变——这同时是"没上报才写 not_reported"的反面证据。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
 [ "$NR" = 6 ] && { echo "PASS: 6 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行 3 条：1 条 OpenAI details（3）+ 2 条 Anthropic（各 40）
+# 20. §8.1 上报缓存的行 5 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 3 ] && { echo "PASS: 3 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 83/107（3+40+40 命中 / 7+50+50 上报输入）；coverage = 3/9
+[ "$RCC" = 5 ] && { echo "PASS: 5 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 163/207（3+40×4 命中 / 7+50×4 上报输入）；coverage = 5/11
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-83/107)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-3/9)<1e-9 and d['cache_read_input_tokens']==83
+ok=(abs(d['cache_hit_rate']-163/207)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-5/11)<1e-9 and d['cache_read_input_tokens']==163
     and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==6)
 sys.exit(0 if ok else 1)
 PY
