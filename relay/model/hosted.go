@@ -157,6 +157,35 @@ func (s *HostedSet) LossOf() []ConversionDiagnostic {
 	return s.Losses
 }
 
+// ResponsesCustomToolNames is the set of tool names a Responses request declared
+// as custom (freeform) tools. They are sent upstream as ordinary functions —
+// that is the only way a protocol without freeform tools can carry them — so
+// the response side needs the names back to restore their calls as
+// custom_tool_call items instead of function_call ones.
+//
+// This is a remember-set, not a loss record: it rides on the request as a
+// `json:"-"` field and is read by the renderers.
+type ResponsesCustomToolNames map[string]struct{}
+
+// Has reports whether name was declared as a custom tool. A nil set has
+// nothing, so callers never need a nil check.
+func (n ResponsesCustomToolNames) Has(name string) bool {
+	if n == nil || name == "" {
+		return false
+	}
+	_, ok := n[name]
+	return ok
+}
+
+// Add records a name. A nil set is a no-op, so a caller can build the set
+// lazily through the zero value of the field that holds it.
+func (n *ResponsesCustomToolNames) Add(name string) {
+	if *n == nil {
+		*n = make(ResponsesCustomToolNames, 1)
+	}
+	(*n)[name] = struct{}{}
+}
+
 // HostedStatus is the Responses status vocabulary, reused as the neutral one.
 const (
 	HostedStatusInProgress = "in_progress"
@@ -643,6 +672,18 @@ const (
 	DiagForcedChoiceDowngraded   = "forced_tool_choice_downgraded"
 	DiagSearchContinuationLost   = "web_search_result_continuation_lost"
 
+	// A Responses custom (freeform) tool has no chat equivalent, so it is sent
+	// upstream as a function taking one string argument. Nothing is lost — the
+	// tool stays callable — so this is presentation severity: it is recorded
+	// and logged, and only a strict policy turns it into a refusal.
+	DiagCustomToolAsFunction = "custom_tool_as_function"
+
+	// A custom tool that shares its name with another tool has to be dropped:
+	// the target protocol tells their calls apart by name alone, so one of them
+	// would be unreachable. Unlike the downgrade above this changes what the
+	// model can do, hence error severity.
+	DiagCustomToolNameConflict = "custom_tool_name_conflict"
+
 	// Response-phase codes. They never reach a client: the response is already
 	// being written, and the reference implementation's rule is that the
 	// response phase does not reject under any policy. They exist so the
@@ -676,7 +717,13 @@ func ValidToolLossPolicy(p string) bool {
 // that only changes how the answer is presented.
 type DiagnosticSeverity string
 
-const DiagnosticError DiagnosticSeverity = "error"
+const (
+	DiagnosticError DiagnosticSeverity = "error"
+	// DiagnosticWarning marks a loss that changes only how the answer is
+	// presented. It is reported and logged like any other, but it does not
+	// fail a request under "safe" — only "strict" refuses on it.
+	DiagnosticWarning DiagnosticSeverity = "warning"
+)
 
 // ConversionDiagnostic records one thing the translation could not carry.
 type ConversionDiagnostic struct {
@@ -687,14 +734,29 @@ type ConversionDiagnostic struct {
 }
 
 // NewHostedLoss builds a diagnostic for something the target protocol could not
-// express. Every loss this stage reports is severity=error — a hosted tool
-// that disappears changes what the model does, not just how the reply looks.
+// express. A hosted tool that disappears changes what the model does, not just
+// how the reply looks, so this builder is error severity throughout; use
+// NewPresentationLoss for a loss that only changes the reply's shape.
 func NewHostedLoss(code, path, format string, args ...any) ConversionDiagnostic {
 	return ConversionDiagnostic{
 		Code:     code,
 		Path:     path,
 		Message:  fmt.Sprintf(format, args...),
 		Severity: DiagnosticError,
+	}
+}
+
+// NewPresentationLoss builds a diagnostic for a loss that changes how the
+// answer is presented rather than what the model was asked to do. The
+// distinction is the reference implementation's (it calls this
+// presentationLoss): such a loss is logged and counted, passes under "allow"
+// and "safe", and is refused only under "strict".
+func NewPresentationLoss(code, path, format string, args ...any) ConversionDiagnostic {
+	return ConversionDiagnostic{
+		Code:     code,
+		Path:     path,
+		Message:  fmt.Sprintf(format, args...),
+		Severity: DiagnosticWarning,
 	}
 }
 
