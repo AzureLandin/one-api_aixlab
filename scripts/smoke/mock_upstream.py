@@ -34,6 +34,12 @@ MESSAGES_USAGE = {"input_tokens": 50, "output_tokens": 12, "cache_read_input_tok
 # suddenly grow a search block.
 HOSTED_MARKER = b"use-hosted-search"
 
+# The raw input the fixture's upstream returns for a Responses custom tool. It is
+# deliberately NOT JSON: the whole point of a freeform tool is that its input is
+# text, so a converter that assumes an argument object cannot fake its way past
+# this. It is multi-line so the fragment-interleaving path is exercised too.
+CUSTOM_TOOL_INPUT = "*** Begin Patch\n*** End Patch\n"
+
 
 def sse_event(obj, event=None):
     """Frame one OpenAI chat.completion.chunk (event line only when present)."""
@@ -96,6 +102,43 @@ def stream_tool_chunks():
         {"index": 0, "function": {"arguments": "\"SF\"}"}},
         {"index": 1, "function": {"arguments": "{\"tz\":\"UTC\"}"}},
     ]})
+    yield chunk({"tool_calls": []}, finish="tool_calls")
+    yield sse_event({
+        "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000,
+        "model": "gpt-3.5-turbo", "choices": [],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20},
+    })
+    yield b"data: [DONE]\n\n"
+
+
+def stream_custom_tool_chunks(name):
+    """One function call whose arguments are a {"input": "<freeform text>"} object
+    streamed in fragments.
+
+    The gateway has to buffer this and hand the client the raw text once, at
+    close: a fragment of a JSON object cannot be unwrapped on its own, and the
+    input is multi-line, so a converter that streamed it piecewise would leak
+    `{"input":"*** Beg` to the client."""
+    arguments = json.dumps({"input": CUSTOM_TOOL_INPUT})
+    third = len(arguments) // 3 or 1
+    parts = [arguments[:third], arguments[third:2 * third], arguments[2 * third:]]
+
+    def chunk(delta, finish=None):
+        choice = {"index": 0, "delta": delta}
+        if finish is not None:
+            choice["finish_reason"] = finish
+        return sse_event({
+            "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000,
+            "model": "gpt-3.5-turbo", "choices": [choice],
+        })
+
+    yield chunk({"role": "assistant", "tool_calls": [
+        {"index": 0, "id": "call_mock_custom", "type": "function",
+         "function": {"name": name, "arguments": ""}},
+    ]})
+    for part in parts:
+        if part:
+            yield chunk({"tool_calls": [{"index": 0, "function": {"arguments": part}}]})
     yield chunk({"tool_calls": []}, finish="tool_calls")
     yield sse_event({
         "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000,
@@ -381,6 +424,30 @@ def wants_tools(raw):
     return False
 
 
+def custom_tool_name(raw):
+    """The name of the Responses custom (freeform) tool the gateway downgraded to
+    a function, if it sent one.
+
+    The gateway cannot ask a chat upstream for a freeform tool, so it sends a
+    function whose only argument is a required string. That shape — not the
+    original declaration — is what arrives here, which is exactly what this
+    fixture keys on: an upstream that received the declaration unchanged would
+    never match."""
+    try:
+        tools = json.loads(raw).get("tools")
+    except Exception:
+        return None
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function") or {}
+        params = function.get("parameters") or {}
+        properties = params.get("properties") or {}
+        if params.get("required") == ["input"] and (properties.get("input") or {}).get("type") == "string":
+            return function.get("name")
+    return None
+
+
 def wants_hosted(raw):
     """True when the request declared a hosted tool — one the UPSTREAM runs.
 
@@ -455,12 +522,19 @@ class MockHandler(BaseHTTPRequestHandler):
                     fh.write(raw)
             except OSError:
                 pass
+            custom = custom_tool_name(raw)
             if wants_stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                for chunk in (stream_tool_chunks() if tools else stream_chunks()):
+                if custom:
+                    chunks = stream_custom_tool_chunks(custom)
+                elif tools:
+                    chunks = stream_tool_chunks()
+                else:
+                    chunks = stream_chunks()
+                for chunk in chunks:
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 return
@@ -473,6 +547,12 @@ class MockHandler(BaseHTTPRequestHandler):
                 # a converter that only reads content drops the calls entirely.
                 message = {"role": "assistant", "content": None, "tool_calls": TOOL_CALLS}
                 finish_reason = "tool_calls"
+                if custom:
+                    # The downgraded freeform tool answers in the shape it was
+                    # declared with: the raw text, in the one string argument.
+                    message = {"role": "assistant", "content": None, "tool_calls": [{
+                        "index": 0, "id": "call_mock_custom", "type": "function",
+                        "function": {"name": custom, "arguments": json.dumps({"input": CUSTOM_TOOL_INPUT})}}]}
             # §8.1 end-to-end: when the prompt carries the marker, report cached
             # tokens via the OpenAI detail field (maps to cache_read_input_tokens).
             if b"usecache" in raw:
