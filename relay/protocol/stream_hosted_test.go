@@ -120,7 +120,7 @@ func mcpArtifact(id, status string) relaymodel.HostedOutputItem {
 // the finished output from.
 func TestResponsesStream_HostedItemTakesItsPlaceInOutputOrder(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o", nil)
 
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"content":"before "}}]}`))
 	_ = s.Hosted(relaymodel.HostedStreamEvent{
@@ -193,7 +193,7 @@ func TestResponsesStream_HostedItemTakesItsPlaceInOutputOrder(t *testing.T) {
 // never fabricated a result it did not have.
 func TestResponsesStream_UnclosedHostedItemIsClosedIncomplete(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_2", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_2", "gpt-4o", nil)
 	_ = s.Hosted(relaymodel.HostedStreamEvent{
 		Phase: relaymodel.HostedPhaseStart,
 		Item:  searchArtifact("ws_2", relaymodel.HostedStatusInProgress),

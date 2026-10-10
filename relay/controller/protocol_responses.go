@@ -14,8 +14,8 @@ var responsesEntry = &protocolEntry{
 	Protocol: upstream.OpenAIResponses,
 	Parse:    protocol.ParseResponses,
 	Render:   protocol.RenderResponses,
-	NewStream: func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage) protocolStream {
-		return protocol.NewResponsesStream(w, id, model)
+	NewStream: func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage, customTools relaymodel.ResponsesCustomToolNames) protocolStream {
+		return protocol.NewResponsesStream(w, id, model, customTools)
 	},
 }
 

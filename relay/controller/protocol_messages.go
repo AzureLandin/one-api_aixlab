@@ -16,7 +16,9 @@ var messagesEntry = &protocolEntry{
 	Protocol: upstream.AnthropicMessages,
 	Parse:    protocol.ParseMessages,
 	Render:   protocol.RenderMessages,
-	NewStream: func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage) protocolStream {
+	// The Anthropic protocol has no freeform tools, so it never has a custom
+	// set to restore: the parameter is part of the shared factory shape only.
+	NewStream: func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage, _ relaymodel.ResponsesCustomToolNames) protocolStream {
 		// Re-key the shared stream id to the Anthropic msg_ namespace.
 		msgID := "msg_" + strings.TrimPrefix(strings.TrimPrefix(id, "resp_"), "chatcmpl-")
 		return protocol.NewMessagesStream(w, msgID, model, promptUsage)

@@ -22,7 +22,10 @@ import (
 )
 
 // streamFactory builds a protocol-specific typed SSE writer for a stream.
-type streamFactory func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage) protocolStream
+// customTools carries the request's Responses custom (freeform) tool names: the
+// renderer needs them before the first chunk, since a call to one of those tools
+// has to be announced as a custom_tool_call rather than a function_call.
+type streamFactory func(w *sse.Writer, id, model string, promptUsage *relaymodel.Usage, customTools relaymodel.ResponsesCustomToolNames) protocolStream
 
 // protocolStream is the shared shape of the Responses and Messages typed
 // stream renderers.
@@ -229,7 +232,7 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 	// message_start input_tokens for protocols that report it there. Output
 	// tokens and the authoritative usage are finalized at stream end.
 	promptSeed := &relaymodel.Usage{PromptTokens: m.PromptTokens}
-	stream := entry.NewStream(writer, respID, m.ActualModelName, promptSeed)
+	stream := entry.NewStream(writer, respID, m.ActualModelName, promptSeed, normalized.CustomTools)
 
 	aborted := false
 	for {

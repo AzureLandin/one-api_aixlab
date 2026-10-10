@@ -50,10 +50,18 @@ type ResponsesStream struct {
 	hostedDone  map[string]bool
 	hostedSeq   int
 	losses      relaymodel.HostedLossLog
+
+	// customTools names the tools the client declared as freeform. They go
+	// upstream as functions taking one string argument, so their calls have to
+	// come back as custom_tool_call items — with the raw input instead of an
+	// argument object. A nil set means the client declared none.
+	customTools relaymodel.ResponsesCustomToolNames
 }
 
 // NewResponsesStream writes response.created and response.in_progress.
-func NewResponsesStream(w *sse.Writer, respID, model string) *ResponsesStream {
+// customTools is the request's set of Responses custom (freeform) tool names;
+// pass nil when the client declared none.
+func NewResponsesStream(w *sse.Writer, respID, model string, customTools relaymodel.ResponsesCustomToolNames) *ResponsesStream {
 	r := &ResponsesStream{
 		w:           w,
 		respID:      respID,
@@ -68,11 +76,19 @@ func NewResponsesStream(w *sse.Writer, respID, model string) *ResponsesStream {
 		hostedItem:  map[string]map[string]any{},
 		hostedIndex: map[string]int{},
 		hostedDone:  map[string]bool{},
+		customTools: customTools,
 	}
 	base := r.snapshot("in_progress", nil, false)
 	_ = w.Event("response.created", map[string]any{"type": "response.created", "response": base})
 	_ = w.Event("response.in_progress", map[string]any{"type": "response.in_progress", "response": base})
 	return r
+}
+
+// custom reports whether the call at this tool index is one the client declared
+// as a freeform tool. A call the upstream never named is never custom: without a
+// name there is nothing to match against.
+func (r *ResponsesStream) custom(idx int) bool {
+	return r.customTools.Has(r.toolName[idx])
 }
 
 // addItem appends an output item and returns its output_index.
@@ -101,14 +117,26 @@ func (r *ResponsesStream) textItem(status string) map[string]any {
 	}
 }
 
-// functionCallItem builds the function_call output item at the given status.
-// `arguments` is always a JSON object string: the Responses API rejects an empty
-// or non-object argument payload, so a call that streamed nothing is closed with
-// `{}` exactly like the chat-completions path does.
+// functionCallItem builds the tool-call output item at the given status: a
+// custom_tool_call when the client declared this tool freeform, a function_call
+// otherwise.
+//
+// A function's `arguments` is always a JSON object string — the Responses API
+// rejects an empty or non-object payload, so a call that streamed nothing is
+// closed with `{}` exactly like the chat-completions path does. A custom tool
+// carries its raw input instead and an empty one stays empty: there is no object
+// to fall back to, and `{}` would be the wrong type there.
 func (r *ResponsesStream) functionCallItem(toolIdx int, status string) map[string]any {
 	args := ""
 	if b := r.toolArgs[toolIdx]; b != nil {
 		args = b.String()
+	}
+	if r.custom(toolIdx) {
+		return map[string]any{
+			"id": r.toolOpen[toolIdx], "type": "custom_tool_call",
+			"call_id": r.toolCall[toolIdx], "name": r.toolName[toolIdx],
+			"input": customToolInputFromArguments(args), "status": status,
+		}
 	}
 	if args == "" {
 		args = "{}"
@@ -118,6 +146,19 @@ func (r *ResponsesStream) functionCallItem(toolIdx int, status string) map[strin
 		"call_id": r.toolCall[toolIdx], "name": r.toolName[toolIdx],
 		"arguments": args, "status": status,
 	}
+}
+
+// toolItemInProgress builds the item a response.output_item.added announces.
+// It is a shape of its own because nothing is known about the payload yet: the
+// arguments are still arriving, so a function announces an empty argument object
+// and a custom tool an empty input.
+func (r *ResponsesStream) toolItemInProgress(toolIdx int) map[string]any {
+	if r.custom(toolIdx) {
+		return map[string]any{"id": r.toolOpen[toolIdx], "type": "custom_tool_call", "call_id": r.toolCall[toolIdx],
+			"name": r.toolName[toolIdx], "input": "", "status": "in_progress"}
+	}
+	return map[string]any{"id": r.toolOpen[toolIdx], "type": "function_call", "call_id": r.toolCall[toolIdx],
+		"name": r.toolName[toolIdx], "arguments": "", "status": "in_progress"}
 }
 
 func (r *ResponsesStream) ensureTextItem() error {
@@ -215,8 +256,7 @@ func (r *ResponsesStream) Chunk(ch sse.Chunk) error {
 			"type":         "response.output_item.added",
 			"item_id":      fcID,
 			"output_index": outIdx,
-			"item": map[string]any{"id": fcID, "type": "function_call", "call_id": r.toolCall[td.Index],
-				"name": r.toolName[td.Index], "arguments": "", "status": "in_progress"},
+			"item":         r.toolItemInProgress(td.Index),
 		}); err != nil {
 			return err
 		}
@@ -287,7 +327,15 @@ func (r *ResponsesStream) LossOf() []relaymodel.ConversionDiagnostic { return r.
 
 // emitArgsDelta writes one function_call_arguments.delta. The event names the
 // call by item_id and output_index; the real API sends no call_id here.
+//
+// A custom tool emits nothing from here. Its input arrives as a JSON object
+// being assembled fragment by fragment, and a fragment like `{"input":"*** Beg`
+// cannot be unwrapped into the raw text the client expects — so the whole input
+// is sent once, at close, as custom_tool_call_input.delta. See Finish.
 func (r *ResponsesStream) emitArgsDelta(idx int, args string) error {
+	if r.custom(idx) {
+		return nil
+	}
 	return r.w.Event("response.function_call_arguments.delta", map[string]any{
 		"type":         "response.function_call_arguments.delta",
 		"item_id":      r.toolOpen[idx],
@@ -354,8 +402,7 @@ func (r *ResponsesStream) Finish(finishReason string, usage *relaymodel.Usage) e
 			"type":         "response.output_item.added",
 			"item_id":      fcID,
 			"output_index": outIdx,
-			"item": map[string]any{"id": fcID, "type": "function_call", "call_id": r.toolCall[idx],
-				"name": r.toolName[idx], "arguments": "", "status": "in_progress"},
+			"item":         r.toolItemInProgress(idx),
 		}); err != nil {
 			return err
 		}
@@ -396,11 +443,34 @@ func (r *ResponsesStream) Finish(finishReason string, usage *relaymodel.Usage) e
 		fcID := id
 		outIdx := r.outputIndex(fcID)
 		item := r.functionCallItem(idx, status)
-		if err := r.w.Event("response.function_call_arguments.done", map[string]any{
-			"type": "response.function_call_arguments.done", "item_id": fcID,
-			"output_index": outIdx, "arguments": item["arguments"],
-		}); err != nil {
-			return err
+		// A custom tool's input never streamed fragment by fragment, and cannot:
+		// each fragment is a piece of a JSON object that only means anything once
+		// whole. It is delivered here instead — one delta carrying the entire raw
+		// text, then the closing event. An empty call skips the delta rather than
+		// announcing an empty payload twice.
+		if !r.custom(idx) {
+			if err := r.w.Event("response.function_call_arguments.done", map[string]any{
+				"type": "response.function_call_arguments.done", "item_id": fcID,
+				"output_index": outIdx, "arguments": item["arguments"],
+			}); err != nil {
+				return err
+			}
+		} else {
+			input, _ := item["input"].(string)
+			if input != "" {
+				if err := r.w.Event("response.custom_tool_call_input.delta", map[string]any{
+					"type": "response.custom_tool_call_input.delta", "item_id": fcID,
+					"output_index": outIdx, "delta": input,
+				}); err != nil {
+					return err
+				}
+			}
+			if err := r.w.Event("response.custom_tool_call_input.done", map[string]any{
+				"type": "response.custom_tool_call_input.done", "item_id": fcID,
+				"output_index": outIdx, "input": input,
+			}); err != nil {
+				return err
+			}
 		}
 		if err := r.w.Event("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "item_id": fcID,

@@ -219,7 +219,7 @@ func TestMessagesStream_DefersBlockUntilNamed(t *testing.T) {
 // Responses client reads them from response.output, not from the deltas.
 func TestResponsesStream_CompletedCarriesFunctionCalls(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o", nil)
 	for _, raw := range []string{
 		`{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
 			{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
@@ -286,7 +286,7 @@ func TestResponsesStream_CompletedCarriesFunctionCalls(t *testing.T) {
 // object in the terminal output.
 func TestResponsesStream_SilentToolCallGetsEmptyObject(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o", nil)
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"f"}}]}}]}`))
 	_ = s.Finish("tool_calls", nil)
 
@@ -393,7 +393,7 @@ func TestMessagesStream_NamelessCallIsNotToolUse(t *testing.T) {
 // it later; the terminal output must still carry the real call_id.
 func TestResponsesStream_CallIDArrivesLate(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o", nil)
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"get_weather"}}]}}]}`))
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`))
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function"}]}}]}`))
@@ -416,7 +416,7 @@ func TestResponsesStream_CallIDArrivesLate(t *testing.T) {
 // function_call without a name is not dispatchable by the client.
 func TestResponsesStream_DoesNotAnnounceBeforeName(t *testing.T) {
 	c := &capture{}
-	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o")
+	s := NewResponsesStream(sse.NewWriter(c), "resp_1", "gpt-4o", nil)
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"arguments":"{\"c\":"}}]}}]}`))
 	if strings.Contains(c.buf.String(), "response.output_item.added") {
 		t.Fatalf("nameless function_call was announced:\n%s", c.buf.String())
@@ -439,7 +439,7 @@ func TestStream_RejectsIndexReuse(t *testing.T) {
 	}
 
 	c2 := &capture{}
-	rs := NewResponsesStream(sse.NewWriter(c2), "resp_1", "gpt-4o")
+	rs := NewResponsesStream(sse.NewWriter(c2), "resp_1", "gpt-4o", nil)
 	_ = rs.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"f"}}]}}]}`))
 	if err := rs.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"g"}}]}}]}`)); err == nil {
 		t.Fatal("responses: mid-stream name change was accepted")

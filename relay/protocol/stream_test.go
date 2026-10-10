@@ -25,7 +25,7 @@ func mustParse(t *testing.T, data string) sse.Chunk {
 func TestResponsesStream_TypedEventsText(t *testing.T) {
 	c := &capture{}
 	w := sse.NewWriter(c)
-	s := NewResponsesStream(w, "resp_1", "gpt-4o")
+	s := NewResponsesStream(w, "resp_1", "gpt-4o", nil)
 
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"content":"Hel"}}]}`))
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}`))
@@ -62,7 +62,7 @@ func TestResponsesStream_TypedEventsText(t *testing.T) {
 func TestResponsesStream_ToolArgsNotCrossed(t *testing.T) {
 	c := &capture{}
 	w := sse.NewWriter(c)
-	s := NewResponsesStream(w, "resp_2", "gpt-4o")
+	s := NewResponsesStream(w, "resp_2", "gpt-4o", nil)
 
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"fa","arguments":"{\"x\":"}}]}}]}`))
 	_ = s.Chunk(mustParse(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"fb","arguments":"{\"y\":"}}]}}]}`))
@@ -82,7 +82,7 @@ func TestResponsesStream_ToolArgsNotCrossed(t *testing.T) {
 func TestResponsesStream_ErrorSurfaced(t *testing.T) {
 	c := &capture{}
 	w := sse.NewWriter(c)
-	s := NewResponsesStream(w, "resp_3", "gpt-4o")
+	s := NewResponsesStream(w, "resp_3", "gpt-4o", nil)
 	_ = s.Error(relaymodel.Error{Message: "boom", Type: "server_error"})
 	out := c.buf.String()
 	if !strings.Contains(out, "event: response.failed") || !strings.Contains(out, "boom") {
