@@ -90,6 +90,13 @@ type GeneralOpenAIRequest struct {
 	// upstream codec translates from. It is `json:"-"`: it must never reach an
 	// upstream body, and it is read by the codec's RequestBody, not by the wire.
 	Hosted *HostedSet `json:"-"`
+
+	// CustomTools is the set of tool names the client declared as Responses
+	// custom (freeform) tools. They are sent upstream as ordinary functions, so
+	// this is the only record that their calls should come back as
+	// custom_tool_call items. Like Hosted it is `json:"-"`: it is pipeline
+	// state, not something an upstream body ever carries.
+	CustomTools ResponsesCustomToolNames `json:"-"`
 }
 
 func (r GeneralOpenAIRequest) ParseInput() []string {

@@ -440,8 +440,14 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return invalidField("tools", "tools 必须是数组")
 	}
+	// Custom (freeform) tools are held back rather than appended: whether one
+	// can be sent at all depends on the other tools in the same array, which
+	// this walk has not finished reading. See admitCustomTools.
+	var custom []customTool
+
 	for i, tool := range tools {
 		tt := jsonStringOf(tool, "type")
+		path := "tools[" + itoa(i) + "]"
 		if tt == "function" {
 			fn := relaymodel.Function{
 				Name:        jsonStringOf(tool, "name"),
@@ -462,8 +468,27 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 			})
 			continue
 		}
+		// A custom (freeform) tool. Chat Completions has no freeform tool, so
+		// the only way to keep it callable is to send it as a function taking
+		// one string argument — which is what the reference implementation
+		// does, and what makes Codex's apply_patch reachable at all.
+		if tt == "custom" {
+			name := jsonStringOf(tool, "name")
+			if name == "" {
+				return invalidField(path+".name", "custom 工具缺少 name")
+			}
+			custom = append(custom, customTool{path: path, name: name, tool: relaymodel.Tool{
+				Type: "function",
+				Function: relaymodel.Function{
+					Name:        name,
+					Description: customToolDescription(tool),
+					Parameters:  customToolInputSchema(),
+				},
+			}})
+			continue
+		}
 		// A hosted/built-in tool (web_search, file_search, computer_use, mcp,
-		// image_generation, code_interpreter, local_shell, custom). It has no Chat
+		// image_generation, code_interpreter, local_shell). It has no Chat
 		// Completions equivalent, so it cannot go in normalized.Tools — but it is
 		// still extracted rather than dropped, because the upstream codec is the
 		// only place that knows whether the target can express it. Clients such as
@@ -475,7 +500,7 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 			Execution:  relaymodel.HostedExecutionOf(tt),
 			NativeType: tt,
 			Name:       jsonStringOf(tool, "name"),
-			Path:       "tools[" + itoa(i) + "]",
+			Path:       path,
 		}
 		// The web-search knobs. Any one of them alone is enough to make the
 		// declaration worth carrying, so the gate is "has any", not "has the
@@ -496,7 +521,102 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 		}
 		set.Definitions = append(set.Definitions, def)
 	}
+	admitCustomTools(normalized, custom)
 	return nil
+}
+
+// customTool is a Responses custom (freeform) tool on its way upstream as a
+// function, held back until the whole tools array has been read.
+type customTool struct {
+	path string
+	name string
+	tool relaymodel.Tool
+}
+
+// admitCustomTools appends the custom tools that can be sent and records what
+// happened to the rest.
+//
+// Two tools sharing a name cannot be told apart by a protocol that identifies
+// tools by name alone, so a custom tool colliding with another tool is dropped
+// and named rather than left to make one of the two unreachable. Functions win
+// whatever the order: this runs after the array has been read, so a function
+// declared after the custom tool still wins. That is also why the check cannot
+// live in the walk above.
+//
+// The custom tools that do go out are functions in every respect, so their
+// names are remembered on the request — the renderers need them back to return
+// their calls as custom_tool_call items.
+func admitCustomTools(normalized *relaymodel.GeneralOpenAIRequest, custom []customTool) {
+	if len(custom) == 0 {
+		return
+	}
+	taken := make(map[string]struct{}, len(normalized.Tools)+len(custom))
+	for _, t := range normalized.Tools {
+		taken[t.Function.Name] = struct{}{}
+	}
+	for _, c := range custom {
+		if _, exists := taken[c.name]; exists {
+			hostedOf(normalized).AddLoss(relaymodel.NewHostedLoss(
+				relaymodel.DiagCustomToolNameConflict, c.path,
+				"custom 工具 %q 与同名工具冲突，目标协议只靠名字区分调用，已丢弃", c.name))
+			continue
+		}
+		taken[c.name] = struct{}{}
+		normalized.Tools = append(normalized.Tools, c.tool)
+		normalized.CustomTools.Add(c.name)
+		hostedOf(normalized).AddLoss(relaymodel.NewPresentationLoss(
+			relaymodel.DiagCustomToolAsFunction, c.path,
+			"目标协议没有自由格式工具，custom 工具 %q 已作为单 input 字符串参数的函数发送", c.name))
+	}
+}
+
+// customToolInputArgument is the one argument a custom tool's function takes
+// upstream. The reference implementation spells it the same way.
+const customToolInputArgument = "input"
+
+// customToolInputSchema is the schema a custom tool is sent with: a single
+// required string holding the tool's raw input. additionalProperties is false
+// because the whole point is that the model must not invent other arguments.
+func customToolInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			customToolInputArgument: map[string]any{
+				"type":        "string",
+				"description": "Raw input for the tool.",
+			},
+		},
+		"required":             []string{customToolInputArgument},
+		"additionalProperties": false,
+	}
+}
+
+// customToolDescription tells the model what a freeform tool actually wants,
+// since the schema can only say "a string". The client's own description is
+// kept, and so is its grammar — as a hint, because no JSON Schema can enforce
+// one.
+func customToolDescription(tool map[string]json.RawMessage) string {
+	parts := make([]string, 0, 3)
+	if description := jsonStringOf(tool, "description"); description != "" {
+		parts = append(parts, description)
+	}
+	parts = append(parts, `This tool takes freeform text. Put the complete raw text in the "input" argument.`)
+	if raw, ok := tool["format"]; ok {
+		var format map[string]json.RawMessage
+		if json.Unmarshal(raw, &format) == nil && jsonStringOf(format, "type") == "grammar" {
+			if definition := jsonStringOf(format, "definition"); definition != "" {
+				switch syntax := jsonStringOf(format, "syntax"); syntax {
+				case "lark":
+					parts = append(parts, "The input must match this Lark grammar:\n"+definition)
+				case "regex":
+					parts = append(parts, "The input must match this regular expression:\n"+definition)
+				default:
+					parts = append(parts, "The input must match this "+syntax+" grammar:\n"+definition)
+				}
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func parseResponsesToolChoice(raw json.RawMessage, normalized *relaymodel.GeneralOpenAIRequest) *ProtocolError {
@@ -517,34 +637,38 @@ func parseResponsesToolChoice(raw json.RawMessage, normalized *relaymodel.Genera
 		return invalidField("tool_choice", "tool_choice 必须是字符串或对象")
 	}
 	tt := jsonStringOf(m, "type")
-	switch tt {
-	case "function":
+	name := jsonStringOf(m, "name")
+	// A custom tool travels upstream as a function of the same name, so forcing
+	// one has the same shape as forcing a function. A custom tool that lost a
+	// name conflict was never sent, so there is nothing to point at: it falls
+	// through to the hosted path below, which records the downgrade rather than
+	// naming a tool the upstream never received.
+	if tt == "function" || (tt == "custom" && normalized.CustomTools.Has(name)) {
 		normalized.ToolChoice = map[string]any{
 			"type": "function",
 			"function": map[string]any{
-				"name": jsonStringOf(m, "name"),
+				"name": name,
 			},
 		}
 		return nil
-	default:
-		// Any non-function choice names a hosted tool (web_search, file_search,
-		// computer_use, mcp, image_generation, ...). normalized.ToolChoice has no
-		// way to say "force a hosted tool", so the forced choice is recorded on
-		// the hosted set — a target that can express it applies it, and a target
-		// that cannot reports forced_tool_choice_downgraded. Falling back to the
-		// upstream default (auto) here is what keeps an unknown hosted name from
-		// failing the whole request.
-		logger.Debugf(context.Background(),
-			"responses: tool_choice.type=%q is not a function tool; recording it as a forced hosted choice", tt)
-		hostedOf(normalized).ForcedChoice = &relaymodel.HostedDefinition{
-			Kind:       relaymodel.HostedKindFromResponsesToolType(tt),
-			Execution:  relaymodel.HostedExecutionOf(tt),
-			NativeType: tt,
-			Name:       jsonStringOf(m, "name"),
-			Path:       "tool_choice.type",
-		}
-		return nil
 	}
+	// Any other non-function choice names a hosted tool (web_search, file_search,
+	// computer_use, mcp, image_generation, ...). normalized.ToolChoice has no
+	// way to say "force a hosted tool", so the forced choice is recorded on
+	// the hosted set — a target that can express it applies it, and a target
+	// that cannot reports forced_tool_choice_downgraded. Falling back to the
+	// upstream default (auto) here is what keeps an unknown hosted name from
+	// failing the whole request.
+	logger.Debugf(context.Background(),
+		"responses: tool_choice.type=%q is not a function tool; recording it as a forced hosted choice", tt)
+	hostedOf(normalized).ForcedChoice = &relaymodel.HostedDefinition{
+		Kind:       relaymodel.HostedKindFromResponsesToolType(tt),
+		Execution:  relaymodel.HostedExecutionOf(tt),
+		NativeType: tt,
+		Name:       name,
+		Path:       "tool_choice.type",
+	}
+	return nil
 }
 
 // RenderResponses converts an upstream OpenAI chat.completion into the
