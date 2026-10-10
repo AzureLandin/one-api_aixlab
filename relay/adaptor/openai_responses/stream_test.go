@@ -270,7 +270,7 @@ func TestStreamStateStopsAtTheTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestStreamStateReportsFailuresAndSkipsUnmappedItems(t *testing.T) {
+func TestStreamStateReportsFailuresAndKeepsHostedItemsOut(t *testing.T) {
 	t.Run("response.failed", func(t *testing.T) {
 		state := NewStreamState("gpt-5-mock")
 		_, wires := feed(t, state,
@@ -299,11 +299,12 @@ func TestStreamStateReportsFailuresAndSkipsUnmappedItems(t *testing.T) {
 		}
 	})
 
-	t.Run("unmapped item does not truncate the answer", func(t *testing.T) {
+	t.Run("hosted item does not truncate the answer", func(t *testing.T) {
 		state := NewStreamState("gpt-5-mock")
 		_, wires := feed(t, state,
 			event{"response.created", createdEvent},
-			// A hosted tool call: Stage B's business. It is reported, not fatal.
+			// A hosted tool call. It is understood and carried out of band as a
+			// hosted artifact, so it is neither fatal nor a chat-envelope item.
 			event{"response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}`},
 			event{"response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"answer"}`},
 			event{"response.completed", `{"type":"response.completed","response":{"id":"resp_abc","status":"completed","output":[` +

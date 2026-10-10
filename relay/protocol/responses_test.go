@@ -128,69 +128,12 @@ func TestParseResponses_StoreTrueIsIgnored(t *testing.T) {
 	}
 }
 
-// Every hosted/built-in tool type must be tolerated: clients such as Codex
-// enable web_search by default, and refusing made all their requests fail.
-func TestParseResponses_HostedToolsAreDroppedNotRejected(t *testing.T) {
-	for _, toolType := range []string{
-		"web_search", "web_search_preview", "file_search", "computer_use_preview",
-		"code_interpreter", "image_generation", "local_shell", "mcp",
-		"web_search_2025_08_26",
-	} {
-		t.Run(toolType, func(t *testing.T) {
-			body := `{"model":"gpt-4o","input":"hi","tools":[{"type":"` + toolType + `"}]}`
-			req, perr := ParseResponses([]byte(body))
-			if perr != nil {
-				t.Fatalf("tool type %q must be tolerated, got %+v", toolType, perr)
-			}
-			if len(req.Tools) != 0 {
-				t.Fatalf("hosted tool must not be forwarded, got %+v", req.Tools)
-			}
-			if len(req.Messages) != 1 {
-				t.Fatalf("messages must survive, got %+v", req.Messages)
-			}
-		})
-	}
-}
-
-// A function tool alongside hosted ones must still be forwarded.
-func TestParseResponses_KeepsFunctionToolsBesideHostedOnes(t *testing.T) {
-	body := `{"model":"gpt-4o","input":"hi","tools":[
-		{"type":"web_search"},
-		{"type":"function","name":"lookup","description":"d","parameters":{"type":"object"}}
-	]}`
-	req, perr := ParseResponses([]byte(body))
-	if perr != nil {
-		t.Fatalf("unexpected error: %+v", perr)
-	}
-	if len(req.Tools) != 1 || req.Tools[0].Function.Name != "lookup" {
-		t.Fatalf("function tool must be kept, got %+v", req.Tools)
-	}
-}
-
-// The full set of non-message item types must be skipped, not rejected.
-func TestParseResponses_SkipsAllHostedItemTypes(t *testing.T) {
-	itemTypes := []string{
-		"reasoning", "item_reference", "web_search_call", "file_search_call",
-		"computer_call", "computer_call_output", "image_generation_call",
-		"code_interpreter_call", "local_shell_call", "local_shell_call_output",
-		"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
-	}
-	for _, itemType := range itemTypes {
-		t.Run(itemType, func(t *testing.T) {
-			body := `{"model":"gpt-4o","input":[
-				{"type":"message","role":"user","content":"hi"},
-				{"type":"` + itemType + `","id":"x_1","call_id":"c_1"}
-			]}`
-			req, perr := ParseResponses([]byte(body))
-			if perr != nil {
-				t.Fatalf("item type %q must be skipped, got %+v", itemType, perr)
-			}
-			if len(req.Messages) != 1 {
-				t.Fatalf("only the real message may remain, got %+v", req.Messages)
-			}
-		})
-	}
-}
+// The hosted declaration and history cases that used to live here — tolerated
+// and dropped, function tools beside hosted ones, a hosted tool_choice
+// degrading to auto, every non-message item type skipped — now have their
+// assertions in responses_hosted_test.go, where the behaviour they describe
+// lives. They are not weaker there: each one additionally asserts WHERE the
+// hosted data went, which is the whole point of the change.
 
 // encrypted_content is reasoning metadata with no chat equivalent, so it is
 // skipped instead of failing the request.
@@ -294,31 +237,6 @@ func TestParseResponses_LeadingReasoningItemIsSkipped(t *testing.T) {
 	}
 	if len(req.Messages) != 1 || messageText(t, req.Messages[0]) != "hi" {
 		t.Fatalf("want just the user message, got %+v", req.Messages)
-	}
-}
-
-// A tool_choice naming a dropped hosted tool must degrade to the upstream
-// default rather than failing the request.
-func TestParseResponses_HostedToolChoiceDegradesToAuto(t *testing.T) {
-	for _, choice := range []string{
-		`{"type":"web_search"}`,
-		`{"type":"mcp"}`,
-		`{"type":"custom"}`,
-		`{"type":"allowed_tools"}`,
-	} {
-		t.Run(choice, func(t *testing.T) {
-			body := `{"model":"gpt-4o","input":"hi","tool_choice":` + choice + `}`
-			req, perr := ParseResponses([]byte(body))
-			if perr != nil {
-				t.Fatalf("hosted tool_choice must be tolerated, got %+v", perr)
-			}
-			if req.ToolChoice != nil {
-				t.Fatalf("tool_choice must be left unset so the upstream defaults to auto, got %+v", req.ToolChoice)
-			}
-			if len(req.Messages) != 1 {
-				t.Fatalf("messages must survive, got %+v", req.Messages)
-			}
-		})
 	}
 }
 

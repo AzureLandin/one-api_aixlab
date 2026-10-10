@@ -25,6 +25,15 @@ LAST_RESPONSES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_
 # the events together records 13.
 MESSAGES_USAGE = {"input_tokens": 50, "output_tokens": 12, "cache_read_input_tokens": 40}
 
+# A hosted tool — one the UPSTREAM executes itself, like web search — is a
+# different thing from a function tool the client executes, even though both
+# travel in `tools`. The declaration is what makes the tool available; the token
+# below is what makes the fixture's upstream actually USE it. Keeping the two
+# apart is what lets the cells that declare a tool without running one stay on the
+# plain envelope — the passthrough cells assert byte fidelity and must not
+# suddenly grow a search block.
+HOSTED_MARKER = b"use-hosted-search"
+
 
 def sse_event(obj, event=None):
     """Frame one OpenAI chat.completion.chunk (event line only when present)."""
@@ -96,17 +105,30 @@ def stream_tool_chunks():
     yield b"data: [DONE]\n\n"
 
 
-def messages_response(model):
+def messages_response(model, hosted=False):
     """An Anthropic non-streaming body. The thinking block carries a `signature`
     field that the gateway's own Content struct has no slot for: if the relay
-    re-rendered this envelope instead of forwarding it, the field would vanish."""
+    re-rendered this envelope instead of forwarding it, the field would vanish.
+
+    With `hosted`, the answer is one where the upstream ran its own web search:
+    the call block and the result block, sharing an id, ahead of the text — the
+    two-block spelling the gateway merges back into one artifact. The result is
+    what Anthropic's encrypted search results look like: carried opaquely, and
+    impossible for a gateway to reconstruct, which is why the reverse direction
+    records a loss instead of inventing one."""
+    content = []
+    if hosted:
+        content.append({"type": "server_tool_use", "id": "srvtoolu_mock",
+                        "name": "web_search", "input": {"query": "smoke"}})
+        content.append({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_mock",
+                        "content": [{"type": "web_search_result", "url": "https://mock.example",
+                                     "title": "Mock", "encrypted_content": "enc_mock"}]})
+    content.append({"type": "thinking", "thinking": "weighing it", "signature": "sig_mock"})
+    content.append({"type": "text", "text": "ok"})
     return {
         "id": "msg_mock", "type": "message", "role": "assistant",
         "model": model or "claude-mock",
-        "content": [
-            {"type": "thinking", "thinking": "weighing it", "signature": "sig_mock"},
-            {"type": "text", "text": "ok"},
-        ],
+        "content": content,
         "stop_reason": "end_turn", "stop_sequence": None,
         "usage": dict(MESSAGES_USAGE),
     }
@@ -182,15 +204,36 @@ def responses_usage(raw, tools):
     return usage
 
 
-def responses_response(model, tools, raw):
+# One executed web search, as the Responses protocol reports it: an item of its
+# own with the action it took. There is no results field — this protocol hands the
+# results to the model inline — which is why the reverse direction can only report
+# what the search was, never what it found.
+RESPONSES_SEARCH_ITEM = {"id": "ws_mock", "type": "web_search_call", "status": "completed",
+                         "action": {"type": "search", "query": "smoke"}}
+
+# The answer that follows the search. Named because both the plain body and the
+# hosted one end with it, and the hosted cells assert that the loss of the search
+# item did not take the answer with it.
+RESPONSES_MESSAGE_ITEM = {"id": "msg_mock", "type": "message", "role": "assistant",
+                          "status": "completed",
+                          "content": [{"type": "output_text", "text": "ok", "annotations": []}]}
+
+
+def responses_response(model, tools, raw, hosted=False):
     """A Responses non-streaming body. A pure tool turn is function_call items
     with no message item — the shape a converter that only reads message content
-    would answer with nothing at all."""
-    if tools:
+    would answer with nothing at all.
+
+    With `hosted`, the upstream ran its own search, so the search item leads and
+    the answer follows it — the same order the streaming branch produces, and the
+    order a real response has. A search item alone would make "the answer still
+    arrived beside the loss" untestable."""
+    if hosted:
+        output = [dict(RESPONSES_SEARCH_ITEM), RESPONSES_MESSAGE_ITEM]
+    elif tools:
         output = list(RESPONSES_CALL_ITEMS)
     else:
-        output = [{"id": "msg_mock", "type": "message", "role": "assistant", "status": "completed",
-                   "content": [{"type": "output_text", "text": "ok", "annotations": []}]}]
+        output = [dict(RESPONSES_MESSAGE_ITEM)]
     return {
         "id": "resp_mock", "object": "response", "status": "completed",
         "created_at": 1700000000, "model": model or "gpt-mock",
@@ -199,7 +242,7 @@ def responses_response(model, tools, raw):
     }
 
 
-def responses_stream(raw, tools):
+def responses_stream(raw, tools, hosted=False):
     """A real Responses SSE sequence. There is no [DONE] marker: the stream ends
     with response.completed, which is also where the usage and the full output
     arrive. The two calls hold output_index 0 and 1, so a client chunk stream that
@@ -211,6 +254,29 @@ def responses_stream(raw, tools):
     yield ev("response.created", {"type": "response.created", "response": {
         "id": "resp_mock", "object": "response", "status": "in_progress",
         "created_at": 1700000000, "model": "gpt-mock"}})
+
+    if hosted:
+        # A hosted artifact arrives as an ordinary output item: announced, then
+        # closed. Nothing about it is a text chunk, which is precisely why a
+        # client protocol with no hosted vocabulary has to be told about the loss.
+        yield ev("response.output_item.added", {
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"id": "ws_mock", "type": "web_search_call", "status": "in_progress",
+                     "action": {"type": "search", "query": "smoke"}}})
+        yield ev("response.output_item.done", {
+            "type": "response.output_item.done", "output_index": 0,
+            "item": dict(RESPONSES_SEARCH_ITEM)})
+        yield ev("response.output_item.added", {
+            "type": "response.output_item.added", "output_index": 1,
+            "item": {"id": "msg_mock", "type": "message", "role": "assistant", "content": []}})
+        yield ev("response.output_text.delta", {
+            "type": "response.output_text.delta", "item_id": "msg_mock",
+            "output_index": 1, "content_index": 0, "delta": "ok"})
+        yield ev("response.completed", {"type": "response.completed", "response": {
+            "id": "resp_mock", "status": "completed",
+            "output": [dict(RESPONSES_SEARCH_ITEM), dict(RESPONSES_MESSAGE_ITEM)],
+            "usage": responses_usage(raw, tools)}})
+        return
 
     if tools:
         yield ev("response.output_item.added", {
@@ -262,11 +328,57 @@ def responses_stream(raw, tools):
 
 def wants_tools(raw):
     """The gateway only forwards `tools` when the client declared them, so their
-    presence is the switch between the text fixture and the tool-call fixture."""
+    presence is the switch between the text fixture and the function-call fixture.
+
+    A hosted declaration travels in the same array — a web search the upstream
+    executes itself is a tool entry too — so the check is for a FUNCTION entry.
+    Selecting the function-call fixture for a hosted declaration would answer a
+    question nobody asked, and would hide the very difference these cells exist to
+    pin down."""
     try:
-        return bool(json.loads(raw).get("tools"))
+        tools = json.loads(raw).get("tools")
     except Exception:
         return False
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        # A chat/Responses function carries type "function"; a Claude one carries
+        # no type at all (it is identified by name + input_schema).
+        if tool.get("type") in (None, "function", "custom"):
+            return True
+    return False
+
+
+def wants_hosted(raw):
+    """True when the request declared a hosted tool — one the UPSTREAM runs.
+
+    Chat Completions spells it as the `web_search_options` toggle; the other two
+    protocols put a typed entry in `tools`. Only web search and MCP are in the
+    gateway's cross-protocol table, so only those are recognised here: a
+    file_search or computer_use declaration cannot be asked of another target at
+    all, which is a different outcome with its own cell."""
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return False
+    if body.get("web_search_options"):
+        return True
+    for tool in body.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        if (tool.get("type") or "").startswith("web_search") or tool.get("type") == "mcp":
+            return True
+    return False
+
+
+def runs_hosted(raw):
+    """True when the request asks the upstream to actually run its hosted tool.
+
+    Declaring the tool only makes it available; the upstream searches when the
+    turn calls for it. A cell that declares a tool without using it therefore gets
+    the plain envelope — which is what keeps the passthrough cells byte-identical
+    to what they asserted before hosted tools existed."""
+    return wants_hosted(raw) and HOSTED_MARKER in raw
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -303,6 +415,7 @@ class MockHandler(BaseHTTPRequestHandler):
         except Exception:
             wants_stream = False
         tools = wants_tools(raw)
+        hosted = runs_hosted(raw)
 
         if self.path.endswith("/chat/completions"):
             try:
@@ -369,7 +482,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 return
-            body = json.dumps(messages_response((record["body"] or {}).get("model"))).encode()
+            body = json.dumps(messages_response((record["body"] or {}).get("model"), hosted=hosted)).encode()
         elif self.path.endswith("/responses"):
             record = {"raw": raw.decode("utf-8", "replace")}
             try:
@@ -387,11 +500,11 @@ class MockHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                for chunk in responses_stream(raw, tools):
+                for chunk in responses_stream(raw, tools, hosted=hosted):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 return
-            body = json.dumps(responses_response((record["body"] or {}).get("model"), tools, raw)).encode()
+            body = json.dumps(responses_response((record["body"] or {}).get("model"), tools, raw, hosted=hosted)).encode()
         else:
             body = b'{"error":"not found"}'
         self.send_response(200)

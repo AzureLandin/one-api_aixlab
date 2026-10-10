@@ -19,7 +19,10 @@ rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_ch_responses.json tmp_chat_resp.json tmp_chat_resp_sse.txt tmp_msg_resp.json \
       tmp_msg_resp_sse.txt tmp_tool_chatresp.json tmp_tool_msgresp.json tmp_cache_resp.json \
       tmp_pass_resp.json tmp_pass_resp_cache.json tmp_pass_resp_sse.h tmp_pass_resp_sse.txt \
-      tmp_pass_resp_tools_sse.txt
+      tmp_pass_resp_tools_sse.txt \
+      tmp_h_msg_chat.json tmp_h_resp_chat.json tmp_h_mcp_chat.json tmp_h_msg_resp.json \
+      tmp_h_chat_resp.json tmp_h_resp_anthropic.json tmp_h_safe.json tmp_h_stream.txt \
+      tmp_h_hist.json tmp_ch_safe.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -42,6 +45,10 @@ pass=0; fail=0
 check() { # check <name> <expected> <actual>
   if [ "$2" = "$3" ]; then echo "PASS: $1"; pass=$((pass+1)); else echo "FAIL: $1 (expected=$2 actual=$3)"; fail=$((fail+1)); fi
 }
+# log_since <byte-offset> prints the oneapi.log lines written since that offset.
+# The hosted-tool diagnostics are asserted this way so that a later cell cannot
+# satisfy an earlier cell's grep — the same code is emitted from several routes.
+log_since() { tail -c +$(($1 + 1)) oneapi.log 2>/dev/null; }
 
 # 1. root 登录
 curl -s -c jar_root.txt -X POST http://127.0.0.1:13000/api/user/login \
@@ -583,6 +590,213 @@ sleep 1
 PRC=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
 check "passthrough responses cached_tokens→reported cache_read=3" "reported|3|reported" "$PRC"
 
+# 16h. hosted tools（上游自己执行的工具）。B1 只做非流式：请求侧的抽取与挂载、非流式响应侧的
+#      建模、以及按渠道的丢损策略。这组格子断言四件事：
+#      ① 声明以目标协议自己的形状到达上游；
+#      ② 目标协议表达不了的声明按默认策略 allow 丢弃，而请求照常成功；
+#      ③ 该丢弃对运维可见——oneapi.log 里的 hosted_tool_loss 行。这是"绝不静默丢弃"这条约定
+#        唯一被放宽的地方，而放宽的前提正是它必须看得见；
+#      ④ 上游真的执行了搜索时，产物能回到有词汇表的那一侧客户端手里。
+#      夹具只在"声明了托管工具 **且** 请求里带 use-hosted-search"时才真的执行搜索，所以同样
+#      声明了 web_search 的直通格子（16c/16g）拿到的仍是原来的信封。
+
+HS='use-hosted-search'
+
+# 16h-1 /v1/messages 的 web_search_20250305 → chat 上游：折成 web_search_options。
+#      Chat 没有 max_uses / allowed_domains 的位置，两个旋钮记为诊断后丢弃；
+#      user_location 从扁平的规范形态重新包成 chat 的嵌套形态。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_msg_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5,"allowed_domains":["example.com"],"user_location":{"type":"approximate","city":"Shanghai"}}]}')
+check "hosted messages→chat 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: Claude's declaration became the chat toggle"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_request.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_request.json'))
+ws=b.get('web_search_options') or {}
+raw=json.dumps(b)
+ok=(ws.get('user_location')=={'type':'approximate','approximate':{'city':'Shanghai'}}
+    and 'max_uses' not in raw and 'allowed_domains' not in raw)
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+log_since "$OFF" | grep -q 'code=unsupported_search_limit' && log_since "$OFF" | grep -q 'code=unsupported_domain_filter' \
+  && { echo "PASS: the knobs chat cannot express are named, not dropped in silence"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
+# 16h-2 /v1/responses 的 {"type":"web_search"} → chat 上游：同一条路，另一种客户端协议。
+#      Responses 能带 search_context_size，chat 也能，所以它过去了；域名白名单过不去。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_resp_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi","tools":[{"type":"web_search","search_context_size":"high","filters":{"allowed_domains":["example.com"]}}]}')
+check "hosted responses→chat 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: Responses declaration became the chat toggle"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_request.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_request.json'))
+ws=b.get('web_search_options') or {}
+ok=(ws.get('search_context_size')=='high' and 'allowed_domains' not in json.dumps(b))
+sys.exit(0 if ok else 1)
+PY
+
+# 16h-3 Responses 的 MCP 声明 → chat 上游：chat 完全没有 MCP 的位置，默认策略下丢弃并具名，
+#      请求仍然成功——丢一件工具不等于把请求打回去。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_mcp_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","input":"hi","tools":[{"type":"mcp","server_label":"srv","server_url":"https://x"}]}')
+check "hosted responses→chat mcp 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: an unrepresentable declaration invents nothing upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_request.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_request.json'))
+raw=json.dumps(b)
+ok=('web_search_options' not in b and 'mcp' not in raw and 'server_label' not in raw)
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+log_since "$OFF" | grep -q 'code=unsupported_hosted_tool' \
+  && { echo "PASS: the dropped MCP declaration is named"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
+# 16h-4 /v1/messages → responses 上游：声明变成 Responses 自己的 {"type":"web_search"}。
+#      上游真的搜了，但回程是单向的：Responses 的 web_search_call 交不给 Claude 客户端
+#      （Claude 的结果块必须承载 Anthropic 加密签发的搜索结果，网关重建不出来，而只有调用块
+#      没有结果块不是 API 接受的形状），所以整件不渲染、只具名。这一格把这条损失钉住——它
+#      在实现这条链路之前是无声的。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_msg_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d "{\"model\":\"gpt-5-mock\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"$HS\"}],\"tools\":[{\"type\":\"web_search_20250305\",\"name\":\"web_search\"}]}")
+check "hosted messages→responses 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: the declaration reached the Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+tools=b.get('tools') or []
+# The user's text is checked as a substring of the forwarded body rather than at a
+# fixed path: whether a plain user turn becomes a string or a one-part list is the
+# conversion layer's business, and pinning it here would make this cell fail for a
+# reason that has nothing to do with hosted tools.
+ok=('messages' not in b and len(tools)==1 and tools[0].get('type')=='web_search'
+    and 'use-hosted-search' in json.dumps(b))
+sys.exit(0 if ok else 1)
+PY
+python3 - <<'PY' && { echo "PASS: the unreturnable search is omitted, not invented"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_h_msg_resp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_h_msg_resp.json'))
+kinds=[b.get('type') for b in d.get('content',[])]
+ok=(d.get('stop_reason')=='end_turn' and kinds==['text'] and d['content'][0].get('text')=='ok')
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+log_since "$OFF" | grep -q 'code=web_search_response_unrepresentable' && log_since "$OFF" | grep -q 'phase=response' \
+  && { echo "PASS: the response-phase loss is named"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
+# 16h-5 chat 客户端自带的 web_search_options → responses 上游：以前被 convertTools 静默丢弃，
+#      现在映射成 Responses 的 web_search 声明（客户端自己写的值优先）。
+CODE=$(curl -s -o tmp_h_chat_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","messages":[{"role":"user","content":"hi"}],"web_search_options":{"search_context_size":"low"}}')
+check "hosted chat→responses 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: the chat toggle reached the Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+tools=b.get('tools') or []
+ok=(len(tools)==1 and tools[0].get('type')=='web_search'
+    and tools[0].get('search_context_size')=='low')
+sys.exit(0 if ok else 1)
+PY
+
+# 16h-6 /v1/responses → anthropic 上游，且上游真的执行了搜索：B1 唯一一条完整的托管往返——
+#      server_tool_use + web_search_tool_result 合并成一件产物，再渲染成 Responses 自己的
+#      web_search_call。Claude 的 web_search 没有 search_context_size 旋钮，那一个丢损具名。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_resp_anthropic.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"claude-mock-sonnet\",\"input\":\"$HS\",\"tools\":[{\"type\":\"web_search\",\"search_context_size\":\"high\"}]}")
+check "hosted responses→anthropic 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: the declaration reached the Anthropic upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_messages.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_messages.json'))['body'] or {}
+tools=b.get('tools') or []
+ok=('input' not in b and len(tools)==1 and tools[0].get('type')=='web_search_20250305'
+    and tools[0].get('name')=='web_search')
+sys.exit(0 if ok else 1)
+PY
+python3 - <<'PY' && { echo "PASS: the executed search came back as a web_search_call"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 500 tmp_h_resp_anthropic.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_h_resp_anthropic.json'))
+items=[i.get('type') for i in d.get('output',[])]
+first=(d.get('output') or [{}])[0]
+content=((d.get('output') or [{}])[1] or {}).get('content') or []
+ok=(items==['web_search_call','message'] and first.get('status')=='completed'
+    and (first.get('action') or {}).get('query')=='smoke'
+    and [p.get('text') for p in content]==['ok'])
+sys.exit(0 if ok else 1)
+PY
+
+# 16h-7 策略：把 tool_loss_policy 设成 safe 的渠道上，同一种"目标表达不了"的声明变成具名 400。
+#      默认 allow 是运维不表态时的行为，safe/strict 是他们主动选的严格；两条路上的诊断同一批。
+curl -s -b jar_root.txt -X POST http://127.0.0.1:13000/api/channel/ \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"mock-safe","type":1,"base_url":"http://127.0.0.1:19999","key":"sk-safe","models":"safe-mock","group":"default","priority":1,"weight":1,"status":1,"config":"{\"tool_loss_policy\":\"safe\"}"}' > tmp_ch_safe.json
+check "create safe-policy channel" true "$(sed -n 's/.*"success":\([a-z]*\).*/\1/p;q' tmp_ch_safe.json)"
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_safe.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"safe-mock","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"computer_20250124","name":"computer"}]}')
+check "hosted tool_loss_policy=safe refuses by name" 400 "$CODE"
+python3 - <<'PY' && { echo "PASS: the refusal names the hosted loss"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_h_safe.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_h_safe.json'))
+sys.exit(0 if (d.get('code')=='hosted_tool_loss' or (d.get('error') or {}).get('code')=='hosted_tool_loss') else 1)
+PY
+sleep 1
+log_since "$OFF" | grep -q 'code=unsupported_hosted_tool' \
+  && { echo "PASS: the refused request is still logged (refusal never hides the loss)"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
+# 16h-8 B1 的流式规则：声明了托管工具又要流式，而 messages ↔ responses 的桥在下一提交。
+#      默认策略下声明被丢弃 + 具名，流照常成功——今天能用的 Codex 流式请求不会被打挂。
+#      夹具没有真的执行搜索（请求里没有 use-hosted-search），所以这里断言的是规则本身。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -N -o tmp_h_stream.txt -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}')
+check "hosted unbridged stream still streams" 200 "$CODE"
+# The fixture streams the answer as two deltas ("o" then "k"), because a real
+# upstream splits text wherever it likes — so the assertion is that the text block
+# streamed at all, not that some particular string arrived in one piece.
+grep -q '"type":"text_delta"' tmp_h_stream.txt \
+  && { echo "PASS: the stream is unaffected by the hosted declaration"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(head -c 300 tmp_h_stream.txt)"; fail=$((fail+1)); }
+sleep 1
+log_since "$OFF" | grep -q 'code=hosted_tool_streaming_unsupported' \
+  && { echo "PASS: the unbridged stream is named"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
+# 16h-9 回放的托管历史 → chat 上游：第二轮的对话里客户端会把上一轮的搜索记录回放回来，chat
+#      没有承载它的位置，整段历史具名后丢弃，而普通轮次不受影响——"普通块的输出与今天完全
+#      一致"是这次改动风险最高的一处，这一格从客户端协议这一侧把它钉住。
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -o tmp_h_hist.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"messages":[{"role":"user","content":"who won"},{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"final score"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://x","title":"X"}]},{"type":"text","text":"answer"}]}]}')
+check "hosted replayed history to chat 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: the ordinary turn survived the dropped history"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_request.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_request.json'))
+msgs=b.get('messages') or []
+assistant=[m for m in msgs if m.get('role')=='assistant']
+ok=(len(assistant)==1 and assistant[0].get('content')=='answer'
+    and 'server_tool_use' not in json.dumps(b) and 'srvtoolu' not in json.dumps(b))
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+log_since "$OFF" | grep -q 'code=unsupported_hosted_history' \
+  && { echo "PASS: the dropped hosted history is named"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
@@ -591,30 +805,39 @@ check "passthrough responses cached_tokens→reported cache_read=3" "reported|3|
 #     + responses 上游：chat→responses 非流式(1) + 流式(1) + 工具(1)
 #       + messages→responses 非流式(1) + 流式(1) + 工具(1) + 缓存(1) = 18
 #     + 直通 responses 非流式(1) + 流式(1) + 工具流式(1) + 缓存(1) = 22
+#     + 16h 的 8 格（16h-1..6、16h-8、16h-9）= 30；16h-7 在 safe 策略下被具名 400，
+#       codec 层 4xx 不写用量行，所以它是计数中性的。这个精确的 30 就是那条证据：
+#       拒绝的请求若偷偷落了一行，下面这个等号会变成 31。
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 22 ] && { echo "PASS: usage_records 22 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 30 ] && { echo "PASS: usage_records 30 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 22 ] && { echo "PASS: all 22 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 30 ] && { echo "PASS: all 30 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 #     跨协议格子与 responses 上游上报缓存的那条都计入 reported，所以计数不变——这同时是
-#     "没上报才写 not_reported"的反面证据。
+#     "没上报才写 not_reported"的反面证据。16h 有 7 格走不报缓存的上游（chat 的 4 格、
+#     responses 的 2 格 + 那一格流式），15+7=22。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 15 ] && { echo "PASS: 15 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行 7 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
+[ "$NR" = 22 ] && { echo "PASS: 22 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+# 20. §8.1 上报缓存的行 8 条：1 条 OpenAI details（3）+ 5 条 Anthropic（各 40）
 #     + 2 条 Responses input_tokens_details（各 3：翻译路径 1 条 + 直通 1 条）
+#     16h-6（responses→anthropic）是第 5 条：Anthropic 夹具的每个非流式回答都带
+#     cache_read_input_tokens=40，与它是不是托管往返无关。
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 7 ] && { echo "PASS: 7 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 169/221（3+40×4+3×2 命中 / 7+50×4+7×2 上报输入）；coverage = 7/22
+[ "$RCC" = 8 ] && { echo "PASS: 8 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 209/271（169+40 命中 / 221+50 上报输入）；
+#     coverage = 8/30。分母只由上报缓存的行构成，所以 16h 里唯一上报缓存的 16h-6
+#     同时抬高分子与分母，其余 7 格只进 not_reported_cache_calls。
+#     缓存写入仍是 0：没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"。
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-169/221)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-7/22)<1e-9 and d['cache_read_input_tokens']==169
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==15)
+ok=(abs(d['cache_hit_rate']-209/271)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-8/30)<1e-9 and d['cache_read_input_tokens']==209
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==22)
 sys.exit(0 if ok else 1)
 PY
 

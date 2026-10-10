@@ -246,13 +246,39 @@ func TestChatToResponsesRequestDropsStreamOptionsWithoutRefusing(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesRequestRefusesHostedToolType(t *testing.T) {
+// A hosted type in the FUNCTION slot is a different thing from a hosted
+// declaration: the chat protocol's `tools` array holds function tools, so a
+// `type` here that is not "function" is a normalization error rather than
+// something to translate. A hosted declaration arrives on req.Hosted, put there
+// by the parser, and is attached separately.
+func TestChatToResponsesRequestRefusesHostedTypeInTheFunctionSlot(t *testing.T) {
 	req := &relaymodel.GeneralOpenAIRequest{
 		Model:    "gpt-5-mock",
 		Messages: []relaymodel.Message{{Role: "user", Content: "hi"}},
 		Tools:    []relaymodel.Tool{{Type: "web_search", Function: relaymodel.Function{Name: "search"}}},
 	}
 	if _, bizErr := ChatToResponsesRequest(req); bizErr == nil {
-		t.Fatalf("a hosted tool must be refused by name, not silently dropped")
+		t.Fatalf("a non-function type in the function slot must be refused by name")
+	}
+}
+
+// A chat client's own web_search_options used to vanish on this path: it was not
+// a function tool and nothing else read it. It is now a web_search declaration,
+// so the toggle reaches an upstream that can actually act on it.
+func TestChatToResponsesRequestCarriesTheChatSearchToggle(t *testing.T) {
+	req := &relaymodel.GeneralOpenAIRequest{
+		Model:            "gpt-5-mock",
+		Messages:         []relaymodel.Message{{Role: "user", Content: "hi"}},
+		WebSearchOptions: &relaymodel.WebSearchOptions{SearchContextSize: "high"},
+	}
+	out, bizErr := ChatToResponsesRequest(req)
+	if bizErr != nil {
+		t.Fatalf("ChatToResponsesRequest: %v", bizErr)
+	}
+	if len(out.Tools) != 1 || out.Tools[0].Type != "web_search" {
+		t.Fatalf("tools = %+v", out.Tools)
+	}
+	if out.Tools[0].SearchContextSize != "high" {
+		t.Fatalf("the knob must travel: %+v", out.Tools[0])
 	}
 }
