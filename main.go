@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -112,13 +118,72 @@ func main() {
 	server.Use(sessions.Sessions("session", store))
 
 	router.SetRouter(server, buildFS)
-	var port = os.Getenv("PORT")
-	if port == "" {
-		port = strconv.Itoa(*common.Port)
-	}
-	logger.SysLogf("server started on http://localhost:%s", port)
-	err = server.Run(":" + port)
+
+	// Serve through an explicit http.Server rather than gin's Run so a restart can
+	// drain: gin.Run calls http.ListenAndServe, which has no way to stop accepting
+	// and wait for what is already in flight.
+	httpServer := &http.Server{Handler: server}
+	listener, err := listen()
 	if err != nil {
-		logger.FatalLog("failed to start HTTP server: " + err.Error())
+		logger.FatalLog("failed to listen: " + err.Error())
 	}
+	logger.SysLogf("server started on %s", listener.Addr().String())
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.Serve(listener) }()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			logger.FatalLog("failed to start HTTP server: " + err.Error())
+		}
+	case sig := <-quit:
+		// Stop accepting and let the requests already running finish. This is what
+		// keeps a deploy invisible to whoever is mid-answer: the answers here can
+		// run for minutes, and killing them mid-stream is exactly what a user
+		// notices.
+		logger.SysLogf("received %s, draining in-flight requests", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), drainTimeout())
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			logger.SysLog("drain did not finish cleanly: " + err.Error())
+		}
+	}
+}
+
+// listen takes the listening socket from systemd when the service was
+// socket-activated, and binds the port itself otherwise.
+//
+// Socket activation is what makes a restart seamless rather than merely quick:
+// systemd owns the socket, so it stays open while the old process drains and the
+// new one has not started yet. Connections arriving in that window are queued by
+// the kernel and served by whoever comes up, instead of being refused.
+func listen() (net.Listener, error) {
+	if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") != "" {
+		return net.FileListener(os.NewFile(3, "systemd-listener"))
+	}
+	return net.Listen("tcp", ":"+port())
+}
+
+// port is the address to bind when systemd did not hand one over.
+func port() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+	return strconv.Itoa(*common.Port)
+}
+
+// drainTimeout bounds how long a shutdown waits for in-flight requests. The
+// gateway serves answers that legitimately run for minutes, so it is generous —
+// and systemd's TimeoutStopSec has to be larger still, or a SIGKILL cuts the
+// drain short and undoes the point of it.
+func drainTimeout() time.Duration {
+	if v := os.Getenv("SHUTDOWN_TIMEOUT_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 5 * time.Minute
 }

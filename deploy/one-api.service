@@ -1,0 +1,25 @@
+[Unit]
+Description=One API (aixlab internal fork)
+After=network.target one-api.socket
+Requires=one-api.socket
+
+[Service]
+User=root
+WorkingDirectory=/var/lib/one-api
+# No --port: when the service is socket-activated the listening socket comes from
+# systemd (fd 3), and the application uses it instead of binding a port itself.
+ExecStart=/usr/local/bin/one-api --log-dir /var/log/one-api
+Restart=always
+RestartSec=5
+Environment=TZ=Asia/Shanghai
+Environment=TIKTOKEN_CACHE_DIR=/var/lib/one-api/tiktoken
+Environment=SESSION_SECRET=CHANGE_ME
+# How long the application waits for in-flight requests before exiting.
+Environment=SHUTDOWN_TIMEOUT_SECONDS=600
+# Must exceed SHUTDOWN_TIMEOUT_SECONDS. If systemd gives up first it SIGKILLs
+# mid-drain, which is exactly the thing the drain exists to avoid.
+TimeoutStopSec=660
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

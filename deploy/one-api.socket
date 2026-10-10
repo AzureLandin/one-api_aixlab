@@ -1,0 +1,18 @@
+[Unit]
+Description=One API (aixlab internal fork) listening socket
+Documentation=file:/home/azure/Projects/one-api_aixlab/CLAUDE.md
+
+[Socket]
+# systemd owns this socket, not the application. That is the whole point: on a
+# restart the socket stays open while the old process drains and the new one has
+# not started yet, so connections arriving in that window are queued by the
+# kernel and served by whoever comes up — instead of being refused, which is what
+# a plain process-owned listener does.
+ListenStream=3000
+# The gateway streams answers that legitimately run for minutes, so a connection
+# waiting in the backlog must not be timed out by the socket itself.
+Backlog=4096
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target
