@@ -65,8 +65,7 @@ type HostedDefinition struct {
 	NativeType string // the source protocol's own type string, e.g. "web_search_20250305"
 	Name       string // the declaration's name, when it has one
 	WebSearch  *HostedSearchOptions
-	Raw        json.RawMessage // the declaration as it arrived, for same-family re-emit
-	Path       string          // "tools[2]" — for diagnostics
+	Path       string // "tools[2]" — for diagnostics
 }
 
 // HostedSearchOptions carries the web-search knobs a declaration may set. The
@@ -102,8 +101,7 @@ type HostedHistoryItem struct {
 	Arguments json.RawMessage // MCP call arguments
 	Output    json.RawMessage // MCP call output
 	Error     json.RawMessage // MCP call error, when the call failed
-	Raw       json.RawMessage
-	Sequence  int // arrival order, so a renderer can interleave faithfully
+	Sequence  int             // arrival order, so a renderer can interleave faithfully
 	// BeforeMessage is the index into the normalized Messages this item
 	// preceded in the client's transcript (len(Messages) means "it came last").
 	// A hosted turn sits between two messages in every protocol — Claude puts
@@ -175,8 +173,14 @@ type HostedOutputItem struct {
 	Status      string
 	Action      json.RawMessage
 	Arguments   json.RawMessage
-	Output      json.RawMessage
-	Error       *Error
+	// Results is the web-search result list; Output is the MCP call's output.
+	// They are separate fields rather than one, because the two target protocols
+	// put them in different places: Claude wraps both in a result block's
+	// `content`, but Responses spells a search result as `action`/`status` on the
+	// call item and an MCP result as `output`.
+	Results json.RawMessage
+	Output  json.RawMessage
+	Error   *Error
 }
 
 // HostedOutput is the non-streaming form: the artifacts of one response.

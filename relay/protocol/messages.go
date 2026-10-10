@@ -77,9 +77,22 @@ func ParseMessages(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolErro
 		return nil, invalidField("messages", "messages 不能为空")
 	}
 	for i, inb := range inbounds {
-		msgs, perr := messagesInboundToOpenAI(i, inb.Role, inb.Content)
+		msgs, hist, perr := messagesInboundToOpenAI(i, inb.Role, inb.Content)
 		if perr != nil {
 			return nil, perr
+		}
+		// A hosted turn's position is relative to the message list this inbound
+		// message produced; shift it onto the whole transcript's numbering
+		// before filing it, or the upstream would be told to splice it in at
+		// the wrong turn.
+		if len(hist) > 0 {
+			set := hostedOf(normalized)
+			base := len(normalized.Messages)
+			for k := range hist {
+				hist[k].BeforeMessage += base
+				hist[k].Sequence = len(set.History)
+				set.History = append(set.History, hist[k])
+			}
 		}
 		normalized.Messages = append(normalized.Messages, msgs...)
 	}
@@ -116,24 +129,25 @@ func decodeMessagesSystem(raw json.RawMessage) (string, *ProtocolError) {
 // is a string or a block array) into one or more normalized OpenAI messages.
 // A tool_result block becomes a standalone role:"tool" message; assistant
 // tool_use blocks are merged into a single assistant message carrying tool_calls.
-func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]relaymodel.Message, *ProtocolError) {
+func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]relaymodel.Message, []relaymodel.HostedHistoryItem, *ProtocolError) {
 	if role != "user" && role != "assistant" {
-		return nil, invalidField("messages["+itoa(i)+"].role",
+		return nil, nil, invalidField("messages["+itoa(i)+"].role",
 			"messages role 只能是 user/assistant，收到：%s", role)
 	}
 
 	// bare string content
 	if s, ok := decodeString(contentRaw); ok {
-		return []relaymodel.Message{{Role: role, Content: s}}, nil
+		return []relaymodel.Message{{Role: role, Content: s}}, nil, nil
 	}
 
 	var blocks []map[string]json.RawMessage
 	if err := json.Unmarshal(contentRaw, &blocks); err != nil {
-		return nil, invalidField("messages["+itoa(i)+"].content", "content 必须是字符串或 block 数组")
+		return nil, nil, invalidField("messages["+itoa(i)+"].content", "content 必须是字符串或 block 数组")
 	}
 
 	var (
 		out      []relaymodel.Message
+		hist     []relaymodel.HostedHistoryItem
 		curText  []relaymodel.MessageContent
 		curCalls []relaymodel.Tool
 		// flush emits whatever the current Anthropic turn accumulated. Text and
@@ -171,36 +185,120 @@ func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]
 		case "image":
 			ic, perr := decodeMessagesImageBlock(i, j, blk)
 			if perr != nil {
-				return nil, perr
+				return nil, nil, perr
 			}
 			curText = append(curText, ic)
 		case "tool_result":
 			flush()
 			msg, perr := decodeMessagesToolResult(i, j, blk)
 			if perr != nil {
-				return nil, perr
+				return nil, nil, perr
 			}
 			out = append(out, msg)
 		case "tool_use":
 			if role != "assistant" {
-				return nil, invalidField(paramBlock(i, j), "tool_use 只能出现在 assistant 消息中")
+				return nil, nil, invalidField(paramBlock(i, j), "tool_use 只能出现在 assistant 消息中")
 			}
 			t, perr := decodeMessagesToolUse(i, j, blk)
 			if perr != nil {
-				return nil, perr
+				return nil, nil, perr
 			}
 			curCalls = append(curCalls, t)
+		case "server_tool_use", "mcp_tool_use":
+			// A tool the UPSTREAM ran. It is not a tool_use: there is no call
+			// for the client to answer, so it must not become an OpenAI
+			// tool_call. It is recorded as a hosted turn to be replayed into
+			// whatever protocol the selected channel speaks, and what that
+			// protocol cannot carry is a diagnostic rather than a 4xx — the
+			// client is replaying a turn the gateway itself handed it.
+			if role != "assistant" {
+				return nil, nil, invalidField(paramBlock(i, j), "%s 只能出现在 assistant 消息中", bt)
+			}
+			flush()
+			hist = append(hist, claudeHostedCall(blk, len(out)))
+		case "web_search_tool_result", "mcp_tool_result":
+			flush()
+			if !attachHostedResult(hist, jsonStringOf(blk, "tool_use_id"), bt, rawOf(blk, "content")) {
+				// A result whose call was not in this transcript: keep it, so
+				// it is neither lost nor silently folded into a text block.
+				hist = append(hist, relaymodel.HostedHistoryItem{
+					Kind:          relaymodel.HostedKindFromClaudeBlock(bt, ""),
+					NativeType:    bt,
+					ID:            jsonStringOf(blk, "tool_use_id"),
+					BeforeMessage: len(out),
+				})
+			}
 		case "document":
-			return nil, unsupportedField(paramBlock(i, j), "第一版不支持 document block")
+			return nil, nil, unsupportedField(paramBlock(i, j), "第一版不支持 document block")
 		default:
-			return nil, unsupportedField(paramBlock(i, j), "未识别的 content block 类型：%s", bt)
+			return nil, nil, unsupportedField(paramBlock(i, j), "未识别的 content block 类型：%s", bt)
 		}
 	}
 	flush()
-	if len(out) == 0 {
-		return nil, invalidField("messages["+itoa(i)+"].content", "content block 数组未解析出任何内容")
+	if len(out) == 0 && len(hist) == 0 {
+		return nil, nil, invalidField("messages["+itoa(i)+"].content", "content block 数组未解析出任何内容")
 	}
-	return out, nil
+	return out, hist, nil
+}
+
+// claudeHostedCall records a server-executed tool call from a Claude turn.
+func claudeHostedCall(blk map[string]json.RawMessage, before int) relaymodel.HostedHistoryItem {
+	blockType := jsonStringOf(blk, "type")
+	name := jsonStringOf(blk, "name")
+	item := relaymodel.HostedHistoryItem{
+		Kind:          relaymodel.HostedKindFromClaudeBlock(blockType, name),
+		NativeType:    blockType,
+		ID:            jsonStringOf(blk, "id"),
+		Name:          name,
+		ServerLabel:   jsonStringOf(blk, "server_name"),
+		Arguments:     rawOf(blk, "input"),
+		BeforeMessage: before,
+	}
+	if item.Kind == relaymodel.HostedWebSearch {
+		item.Action = claudeSearchAction(blk)
+	}
+	return item
+}
+
+// claudeSearchAction normalizes Claude's server_tool_use input into the search
+// action both directions share. Action is the richer of the two shapes, so it
+// is what the neutral form carries; the Anthropic attach narrows it back.
+func claudeSearchAction(blk map[string]json.RawMessage) json.RawMessage {
+	var input map[string]any
+	if raw := rawOf(blk, "input"); len(raw) > 0 {
+		_ = json.Unmarshal(raw, &input)
+	}
+	action := map[string]any{"type": "search"}
+	if q, ok := input["query"]; ok {
+		action["query"] = q
+	}
+	raw, err := json.Marshal(action)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// attachHostedResult pairs a hosted result block with the call it answers,
+// matching on the call id the way the API does. It reports whether a call was
+// found.
+func attachHostedResult(hist []relaymodel.HostedHistoryItem, toolUseId, blockType string, content json.RawMessage) bool {
+	if toolUseId == "" {
+		return false
+	}
+	isMCP := relaymodel.HostedKindFromClaudeBlock(blockType, "") == relaymodel.HostedMCP
+	for k := len(hist) - 1; k >= 0; k-- {
+		if hist[k].ID != toolUseId {
+			continue
+		}
+		if isMCP {
+			hist[k].Output = content
+		} else {
+			hist[k].Results = content
+		}
+		return true
+	}
+	return false
 }
 
 func normalizeContentPayload(parts []relaymodel.MessageContent) any {
@@ -336,8 +434,24 @@ func parseMessagesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpenA
 		return invalidField("tools", "tools 必须是数组")
 	}
 	for i, tool := range tools {
+		// A non-empty `type` other than "custom" is a hosted (server-side)
+		// tool. This used to be a 4xx. It is carried instead: a client that
+		// declares web_search is asking a question the gateway can often
+		// answer (the chat target maps it to web_search_options, the Responses
+		// target to a web_search tool), and where it cannot, the attach step
+		// records the loss rather than the parser guessing.
 		if n := jsonStringOf(tool, "type"); n != "" && n != "custom" {
-			return unsupportedField("tools["+itoa(i)+"].type", "不支持的工具类型：%s", n)
+			def := relaymodel.HostedDefinition{
+				Kind:       relaymodel.HostedKindFromClaudeToolType(n),
+				Execution:  relaymodel.HostedExecutionOf(n),
+				NativeType: n,
+				Name:       jsonStringOf(tool, "name"),
+				Path:       "tools[" + itoa(i) + "]",
+			}
+			def.WebSearch = claudeWebSearchOptions(tool)
+			set := hostedOf(normalized)
+			set.Definitions = append(set.Definitions, def)
+			continue
 		}
 		params := anyOf(tool, "input_schema")
 		normalized.Tools = append(normalized.Tools, relaymodel.Tool{
@@ -350,6 +464,39 @@ func parseMessagesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpenA
 		})
 	}
 	return nil
+}
+
+// claudeWebSearchOptions reads the web-search knobs Claude declares. They are
+// read even for a kind that ends up unmapped, so the loss is reported with the
+// detail it is losing rather than as a bare type name.
+func claudeWebSearchOptions(tool map[string]json.RawMessage) *relaymodel.HostedSearchOptions {
+	opts := &relaymodel.HostedSearchOptions{
+		SearchContextSize: jsonStringOf(tool, "search_context_size"),
+		UserLocation:      rawOf(tool, "user_location"),
+		AllowedDomains:    jsonStringListOf(tool, "allowed_domains"),
+		BlockedDomains:    jsonStringListOf(tool, "blocked_domains"),
+	}
+	if raw := rawOf(tool, "max_uses"); len(raw) > 0 {
+		var n int
+		if err := json.Unmarshal(raw, &n); err == nil {
+			opts.MaxUses = &n
+		}
+	}
+	return opts
+}
+
+// hostedByName finds a declared hosted tool by the name a tool_choice names.
+func hostedByName(req *relaymodel.GeneralOpenAIRequest, name string) (*relaymodel.HostedDefinition, bool) {
+	if name == "" || req.Hosted == nil {
+		return nil, false
+	}
+	for i := range req.Hosted.Definitions {
+		if req.Hosted.Definitions[i].Name == name {
+			def := req.Hosted.Definitions[i]
+			return &def, true
+		}
+	}
+	return nil, false
 }
 
 func parseMessagesToolChoice(raw json.RawMessage, normalized *relaymodel.GeneralOpenAIRequest) *ProtocolError {
@@ -366,9 +513,18 @@ func parseMessagesToolChoice(raw json.RawMessage, normalized *relaymodel.General
 	case "any":
 		normalized.ToolChoice = "required"
 	case "tool":
+		name := jsonStringOf(m, "name")
+		if def, ok := hostedByName(normalized, name); ok {
+			// The named tool is a hosted one. A chat-style function tool_choice
+			// naming a function the upstream does not have would be worse than
+			// degrading, so the forced choice is recorded and the target attach
+			// either expresses it natively or downgrades it with a diagnostic.
+			hostedOf(normalized).ForcedChoice = def
+			break
+		}
 		normalized.ToolChoice = map[string]any{
 			"type":     "function",
-			"function": map[string]any{"name": jsonStringOf(m, "name")},
+			"function": map[string]any{"name": name},
 		}
 	case "none":
 		normalized.ToolChoice = "none"
@@ -415,7 +571,10 @@ func finishReasonToStopReason(finish string) *string {
 // Messages response (§6.5). usage keeps nil-vs-zero semantics; Anthropic's
 // Usage only has input/output tokens.
 func RenderMessages(upstream *openai.TextResponse, model string) map[string]any {
-	content := []map[string]any{}
+	// Hosted artifacts come first: in a Claude turn the search precedes the
+	// answer, and a server_tool_use the client cannot see the result of is worse
+	// than no block at all.
+	content := renderMessagesHosted(upstream.Hosted)
 	stopReason := "end_turn"
 	if len(upstream.Choices) > 0 {
 		choice := upstream.Choices[0]
@@ -459,6 +618,103 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 		},
 	}
 	return envelope
+}
+
+// renderMessagesHosted turns the upstream's hosted artifacts into the Claude
+// content blocks that describe them: a call block and its result block, per
+// artifact. A kind Claude has no block for is skipped — the client never
+// declared that tool, so there is nothing to hand back, and inventing a block
+// type would put a shape on the wire no Claude client can read.
+func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
+	if hosted == nil || len(hosted.Items) == 0 {
+		return []map[string]any{}
+	}
+	blocks := make([]map[string]any, 0, len(hosted.Items)*2)
+	for i, it := range hosted.Items {
+		name := relaymodel.HostedClaudeBlockName(it.Kind)
+		if name == "" {
+			continue
+		}
+		// Claude requires an id on the call block and the result to name it, so an
+		// artifact that arrived without one gets a position-scoped stand-in rather
+		// than shipping an id-less block the API would reject.
+		id := it.ID
+		if id == "" {
+			id = "hosted_" + itoa(i)
+		}
+		if it.Kind == relaymodel.HostedWebSearch {
+			blocks = append(blocks,
+				map[string]any{
+					"type":  "server_tool_use",
+					"id":    id,
+					"name":  name,
+					"input": claudeSearchInput(it.Action),
+				},
+				map[string]any{
+					"type":        "web_search_tool_result",
+					"tool_use_id": id,
+					"content":     rawArrayOrEmpty(it.Results),
+				})
+			continue
+		}
+		call := map[string]any{
+			"type":  "mcp_tool_use",
+			"id":    id,
+			"name":  it.Name,
+			"input": rawObjectOrEmpty(it.Arguments),
+		}
+		if it.ServerLabel != "" {
+			call["server_name"] = it.ServerLabel
+		}
+		result := map[string]any{
+			"type":        "mcp_tool_result",
+			"tool_use_id": id,
+			"content":     rawArrayOrEmpty(it.Output),
+		}
+		if it.Error != nil {
+			result["is_error"] = true
+		}
+		blocks = append(blocks, call, result)
+	}
+	return blocks
+}
+
+// claudeSearchInput narrows the shared search action back to the `input` object
+// of a server_tool_use block. Anthropic spells a search as {"query": …} and
+// nothing else, while the neutral action also carries a `type`.
+func claudeSearchInput(action json.RawMessage) any {
+	var m map[string]any
+	if len(action) > 0 {
+		_ = json.Unmarshal(action, &m)
+	}
+	if q, ok := m["query"]; ok {
+		return map[string]any{"query": q}
+	}
+	return map[string]any{}
+}
+
+// rawArrayOrEmpty renders a hosted content field as the array Claude expects.
+// `content` on a hosted result block is always an array; an absent or
+// non-array value becomes an empty one rather than a null the client has to
+// special-case.
+func rawArrayOrEmpty(raw json.RawMessage) any {
+	if v := relaymodel.RawToValue(raw); v != nil {
+		if arr, ok := v.([]any); ok {
+			return arr
+		}
+	}
+	return []any{}
+}
+
+// rawObjectOrEmpty renders a hosted input/argument field as the object Claude
+// expects, for the same reason.
+func rawObjectOrEmpty(raw json.RawMessage) any {
+	if v := relaymodel.RawToValue(raw); v != nil {
+		if obj, ok := v.(map[string]any); ok {
+			return obj
+		}
+	}
+	return map[string]any{}
 }
 
 // argumentsToInput turns the accumulated argument string of a tool call into the

@@ -95,6 +95,14 @@ type TextResponse struct {
 	Created     int64                `json:"created"`
 	Choices     []TextResponseChoice `json:"choices"`
 	model.Usage `json:"usage"`
+	// Hosted carries the artifacts of upstream-executed tools (a web search, an
+	// MCP call) that no OpenAI chat field can hold. It is `json:"-"`: the chat
+	// envelope has no hosted vocabulary, so it must not leak into a chat body,
+	// and it is populated by the upstream codec and read by the client
+	// protocol's renderer. A nil value means "the upstream produced none", which
+	// is not the same as "it produced none this time" being unknown — a
+	// non-hosted upstream simply never sets it.
+	Hosted *model.HostedOutput `json:"-"`
 }
 
 type EmbeddingResponseItem struct {

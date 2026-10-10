@@ -48,7 +48,8 @@ func ParseResponses(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolErr
 		return nil, perr
 	}
 
-	messages, perr := responsesInputToMessages(req.Input, req.Instructions)
+	var history []relaymodel.HostedHistoryItem
+	messages, perr := responsesInputToMessages(req.Input, req.Instructions, &history)
 	if perr != nil {
 		return nil, perr
 	}
@@ -67,6 +68,16 @@ func ParseResponses(body []byte) (*relaymodel.GeneralOpenAIRequest, *ProtocolErr
 	}
 	if req.MaxOutputTokens != nil {
 		normalized.MaxTokens = *req.MaxOutputTokens
+	}
+	// Replayed hosted turns are indexed by arrival order. Sequence is assigned
+	// here rather than in the walk so the walk only has to know where in the
+	// transcript each item fell (BeforeMessage), which is the part it alone can
+	// see.
+	if len(history) > 0 {
+		for i := range history {
+			history[i].Sequence = i
+		}
+		normalized.Hosted = &relaymodel.HostedSet{History: history}
 	}
 	if perr := parseResponsesTools(req.Tools, normalized); perr != nil {
 		return nil, perr
@@ -106,7 +117,13 @@ func derefInt(p *int) int {
 // responsesInputToMessages accepts either a bare string or an array of input
 // items (message / function_call / function_call_output / reasoning). Unknown
 // item types raise a structured error naming the type (§6.4).
-func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage) ([]relaymodel.Message, *ProtocolError) {
+//
+// Hosted tool calls the client replayed are appended to history. They are an
+// OUT parameter rather than a second return value because every error path in
+// here already returns two values, and threading a third through a dozen of
+// them would bury the real change.
+func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage,
+	history *[]relaymodel.HostedHistoryItem) ([]relaymodel.Message, *ProtocolError) {
 	var messages []relaymodel.Message
 
 	// instructions -> leading system message
@@ -186,17 +203,25 @@ func responsesInputToMessages(inputRaw, instructionsRaw json.RawMessage) ([]rela
 				return nil, perr
 			}
 			messages = append(messages, msg)
-		case "reasoning", "item_reference", "web_search_call", "file_search_call",
+		case "web_search_call", "mcp_call":
+			// A hosted tool turn the client is replaying. It cannot become a chat
+			// message — the upstream executed it, no client is waiting to answer —
+			// but it does carry what the search found, so it is extracted rather
+			// than dropped: a target protocol that HAS a hosted artifact vocabulary
+			// can put it back on the wire, and the ones that do not report it under
+			// the channel's loss policy instead of losing it wordlessly.
+			*history = append(*history, responsesHostedItem(item, itemType, len(messages)))
+		case "reasoning", "item_reference", "file_search_call",
 			"computer_call", "computer_call_output", "image_generation_call",
 			"code_interpreter_call", "local_shell_call", "local_shell_call_output",
-			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response":
+			"mcp_list_tools", "mcp_approval_request", "mcp_approval_response":
 			// None of these can be expressed in a Chat Completions request: they
-			// are records of the model's own thinking or of server-hosted tool
-			// executions, and the chat format has no field for either. They are
-			// skipped rather than rejected, because clients replay them on every
-			// following turn — rejecting made multi-turn reasoning and web-search
-			// conversations fail outright. The drop is logged in debug mode so it
-			// is never invisible.
+			// are records of the model's own thinking or of hosted tool executions
+			// whose artifacts this gateway does not model (the narrow kind table).
+			// They are skipped rather than rejected, because clients replay them on
+			// every following turn — rejecting made multi-turn reasoning and
+			// web-search conversations fail outright. The drop is logged in debug
+			// mode so it is never invisible.
 			skipped++
 			logger.Debugf(context.Background(),
 				"responses: skipping input item type %q at index %d (no Chat Completions equivalent)",
@@ -271,6 +296,54 @@ func responsesFunctionCallOutputItem(i int, item map[string]json.RawMessage) (re
 		}
 	}
 	return relaymodel.Message{Role: "tool", ToolCallId: callID, Content: output}, nil
+}
+
+// responsesHostedItem reads one replayed hosted turn into the neutral form.
+// before is the index into the normalized transcript the item preceded.
+func responsesHostedItem(item map[string]json.RawMessage, itemType string, before int) relaymodel.HostedHistoryItem {
+	h := relaymodel.HostedHistoryItem{
+		NativeType:    itemType,
+		ID:            jsonStringOf(item, "id"),
+		BeforeMessage: before,
+	}
+	switch itemType {
+	case "web_search_call":
+		h.Kind = relaymodel.HostedWebSearch
+		h.Status = jsonStringOf(item, "status")
+		// The Responses shape ({"type":"search","query":…}) is the richer of the
+		// two, so both parsers normalize onto it and a renderer only has to know
+		// one.
+		h.Action = rawOf(item, "action")
+	case "mcp_call":
+		h.Kind = relaymodel.HostedMCP
+		h.CallID = jsonStringOf(item, "id")
+		h.Name = jsonStringOf(item, "name")
+		h.ServerLabel = jsonStringOf(item, "server_label")
+		h.Status = jsonStringOf(item, "status")
+		h.Arguments = responsesArguments(item["arguments"])
+		h.Output = rawOf(item, "output")
+		h.Error = rawOf(item, "error")
+	}
+	return h
+}
+
+// responsesArguments decodes an argument field that the Responses protocol
+// carries as a JSON-encoded STRING (mcp_call.arguments, like function_call
+// arguments) back into the object itself, so the neutral form is an object
+// whichever protocol it came from. Claude's mcp_tool_use.input is already an
+// object, and a renderer should not have to care which side it started on.
+func responsesArguments(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return raw
+	}
+	if !json.Valid([]byte(s)) {
+		return nil
+	}
+	return json.RawMessage(s)
 }
 
 // ResponsesItemParam renders a stable, human-readable param path for input items.
@@ -389,15 +462,39 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 			})
 			continue
 		}
-		// Hosted/built-in tools (web_search, file_search, computer_use, mcp,
-		// image_generation, code_interpreter, local_shell, custom) have no Chat
-		// Completions equivalent, so they cannot be declared to the upstream.
-		// They are dropped rather than rejected: clients such as Codex enable
-		// web_search by default, and refusing made every such request fail. The
-		// drop is visible in debug logs instead of being silent.
-		logger.Debugf(context.Background(),
-			"responses: dropping tools[%d].type=%q (no Chat Completions equivalent)", i, tt)
-		continue
+		// A hosted/built-in tool (web_search, file_search, computer_use, mcp,
+		// image_generation, code_interpreter, local_shell, custom). It has no Chat
+		// Completions equivalent, so it cannot go in normalized.Tools — but it is
+		// still extracted rather than dropped, because the upstream codec is the
+		// only place that knows whether the target can express it. Clients such as
+		// Codex enable web_search by default, so whatever the policy decides, the
+		// request must not fail merely for declaring one.
+		set := hostedOf(normalized)
+		def := relaymodel.HostedDefinition{
+			Kind:       relaymodel.HostedKindFromResponsesToolType(tt),
+			Execution:  relaymodel.HostedExecutionOf(tt),
+			NativeType: tt,
+			Name:       jsonStringOf(tool, "name"),
+			Path:       "tools[" + itoa(i) + "]",
+		}
+		// The web-search knobs. Any one of them alone is enough to make the
+		// declaration worth carrying, so the gate is "has any", not "has the
+		// first one".
+		if _, hasCtx := tool["search_context_size"]; hasCtx || tool["user_location"] != nil || tool["filters"] != nil {
+			opts := &relaymodel.HostedSearchOptions{}
+			if raw, ok := tool["search_context_size"]; ok {
+				_ = json.Unmarshal(raw, &opts.SearchContextSize)
+			}
+			opts.UserLocation = rawOf(tool, "user_location")
+			if filters, ok := tool["filters"]; ok {
+				var f map[string]json.RawMessage
+				if json.Unmarshal(filters, &f) == nil {
+					opts.AllowedDomains = jsonStringListOf(f, "allowed_domains")
+				}
+			}
+			def.WebSearch = opts
+		}
+		set.Definitions = append(set.Definitions, def)
 	}
 	return nil
 }
@@ -431,12 +528,21 @@ func parseResponsesToolChoice(raw json.RawMessage, normalized *relaymodel.Genera
 		return nil
 	default:
 		// Any non-function choice names a hosted tool (web_search, file_search,
-		// computer_use, mcp, image_generation, ...) that was never forwarded, so
-		// forcing a call to it would be meaningless. Leaving ToolChoice unset
-		// falls back to the upstream default (auto) instead of failing the whole
-		// request, which also avoids chasing new hosted tool names one by one.
+		// computer_use, mcp, image_generation, ...). normalized.ToolChoice has no
+		// way to say "force a hosted tool", so the forced choice is recorded on
+		// the hosted set — a target that can express it applies it, and a target
+		// that cannot reports forced_tool_choice_downgraded. Falling back to the
+		// upstream default (auto) here is what keeps an unknown hosted name from
+		// failing the whole request.
 		logger.Debugf(context.Background(),
-			"responses: ignoring tool_choice.type=%q (not a forwarded function tool)", tt)
+			"responses: tool_choice.type=%q is not a function tool; recording it as a forced hosted choice", tt)
+		hostedOf(normalized).ForcedChoice = &relaymodel.HostedDefinition{
+			Kind:       relaymodel.HostedKindFromResponsesToolType(tt),
+			Execution:  relaymodel.HostedExecutionOf(tt),
+			NativeType: tt,
+			Name:       jsonStringOf(m, "name"),
+			Path:       "tool_choice.type",
+		}
 		return nil
 	}
 }
@@ -452,6 +558,11 @@ func RenderResponses(upstream *openai.TextResponse, model string) map[string]any
 	}
 
 	output := make([]map[string]any, 0, len(upstream.Choices))
+	// Hosted artifacts come first: a web_search_call is the search the assistant
+	// message below is the answer to, and the Responses protocol orders a
+	// transcript that way. Emitting them after the message would tell a client
+	// the model answered before it looked anything up.
+	output = append(output, renderResponsesHosted(upstream.Hosted)...)
 	for _, choice := range upstream.Choices {
 		msgID := "msg_" + strings.TrimPrefix(upstream.Id, "chatcmpl-")
 		content := []map[string]any{}
@@ -509,6 +620,73 @@ func RenderResponses(upstream *openai.TextResponse, model string) map[string]any
 		delete(envelope, "incomplete_details")
 	}
 	return envelope
+}
+
+// renderResponsesHosted turns the upstream's hosted artifacts into Responses
+// output items. A kind with no Responses item type is skipped: the upstream
+// produced an artifact this client protocol has no vocabulary for, the client
+// never declared that tool, and inventing an item type would put a shape on the
+// wire no Responses client knows how to read.
+func renderResponsesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
+	if hosted == nil || len(hosted.Items) == 0 {
+		return nil
+	}
+	items := make([]map[string]any, 0, len(hosted.Items))
+	for _, it := range hosted.Items {
+		itemType := relaymodel.HostedResponsesItemType(it.Kind)
+		if itemType == "" {
+			continue
+		}
+		item := map[string]any{"type": itemType}
+		if it.ID != "" {
+			item["id"] = it.ID
+		}
+		if it.Status != "" {
+			item["status"] = it.Status
+		}
+		switch it.Kind {
+		case relaymodel.HostedWebSearch:
+			if action := relaymodel.RawToValue(it.Action); action != nil {
+				item["action"] = action
+			}
+		case relaymodel.HostedMCP:
+			item["name"] = it.Name
+			item["server_label"] = it.ServerLabel
+			if len(it.Arguments) > 0 {
+				item["arguments"] = rawStringOr(it.Arguments, "{}")
+			}
+			if len(it.Output) > 0 {
+				item["output"] = rawStringOr(it.Output, "")
+			}
+			if it.Error != nil {
+				errObj := map[string]any{}
+				if it.Error.Message != "" {
+					errObj["message"] = it.Error.Message
+				}
+				if it.Error.Code != nil {
+					errObj["code"] = it.Error.Code
+				}
+				if len(errObj) > 0 {
+					item["error"] = errObj
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// rawStringOr renders a raw fragment as the JSON string a wire field expects:
+// a JSON string decodes to its contents, anything else is passed through as its
+// own JSON text. An absent fragment becomes fallback.
+func rawStringOr(raw json.RawMessage, fallback string) string {
+	if len(raw) == 0 {
+		return fallback
+	}
+	if s, ok := decodeString(raw); ok {
+		return s
+	}
+	return string(raw)
 }
 
 func responseID(chatID string) string {
