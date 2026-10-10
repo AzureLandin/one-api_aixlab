@@ -398,16 +398,19 @@ request id
 
 ### 6.4 Responses
 
-第一版明确限制：
-
-- `store` 默认按 `false` 处理。
-- 收到 `previous_response_id` 时返回不支持错误。
-- 收到后台任务参数时返回不支持错误。
-- 不做服务端响应持久化。
 - 使用稳定的 `response.id` 和 `output` 结构。
 - 流式事件必须有明确事件类型，不能把所有片段拼成一条非标准字符串。
 
 输入可以支持文本、图片、工具调用和工具结果；每个不支持的 input item 类型必须被识别并返回结构化错误。
+
+**跨协议时**（Responses 客户端 → 非 Responses 上游，请求须经 `GeneralOpenAIRequest` 中间结构）：
+
+- `store` 默认按 `false` 处理；`store=true` 丢弃并 debug 记录（客户端如 Codex 默认会带，硬拒会打断它），不做服务端响应持久化。
+- 收到 `previous_response_id` 时返回不支持错误。
+- 收到后台任务参数（`background=true`）时返回不支持错误。
+- `tools` 中的内置（hosted）工具类型当前丢弃并 debug 记录；阶段 B 改为具名拒绝或映射。
+
+**同协议时**（Responses 客户端 → Responses 上游）走直通，以上限制**全部不适用**：原生 body 原样转发，`store`、`previous_response_id`、`include`、`reasoning`、`text.format`、hosted 工具声明与未知字段逐字节到达上游；网关只定点补丁顶层 `model` 与强制 prompt（并入 `instructions`）。
 
 ### 6.5 Anthropic Messages
 
@@ -428,9 +431,13 @@ request id
 - `stop_sequence`。
 - usage。
 
+**跨协议时**（Messages 客户端 → 非 Messages 上游）：`thinking`、`cache_control` 与 `server_tool_use`/`web_search_tool_result`/`citations` 在 `GeneralOpenAIRequest` 里没有槽位，会丢失——已知有损，须在文档与冒烟里钉住，不能无声消失。
+
+**同协议时**（Messages 客户端 → Messages 上游）走直通：`cache_control`、`thinking`、`anthropic-beta` 请求头、未知 content block 类型全部原样往返。
+
 ### 6.6 上游协议选择
 
-渠道配置需要能表达上游协议类型，例如：
+渠道配置需要能表达上游协议类型：
 
 ```text
 openai-chat
@@ -439,7 +446,21 @@ anthropic-messages
 compatible
 ```
 
-客户端协议和上游协议不能混为一谈。一个 Anthropic 客户端请求可以经过转换后发送给 OpenAI 兼容上游，反之亦然，但必须经过统一中间结构和能力检查。
+这组字符串一旦由管理员保存进 `channels.config.upstream_protocol`，就成为事实上的公开接口：钉成 `relay/upstream` 里的常量，保存时白名单校验，拼错必须报错。**不能静默退回 `openai-chat`**——那会把渠道悄悄改道到翻译路径上，丢掉 hosted tools，而失败是静默的，正是这个声明要防的事。该字段落在既有的 `channels.config` JSON blob 里，无 schema 变更、无迁移条目。
+
+客户端协议和上游协议不能混为一谈。一个 Anthropic 客户端请求可以发送给 OpenAI 兼容上游，反之亦然，但必须经过统一中间结构和能力检查。三种客户端协议 × 三种上游协议构成矩阵，每格落点如下：
+
+| ↓ 上游 / → 客户端 | chat/completions | responses | messages |
+| --- | --- | --- | --- |
+| openai-chat | chat 路径（raw 快路径） | codec 翻译 | codec 翻译 |
+| anthropic-messages | chat 路径（adaptor 转换） | codec 翻译 | 直通 |
+| openai-responses | chat 路径（`text_responses.go`） | 直通 | codec 翻译 |
+
+- **上游协议解析**：显式配置 > 由 `apitype` 推导 > `openai-chat`。因此既有渠道无需任何配置即保持原行为。
+- **能力检查取代硬编码闸门**：`CanServe(client, up)` 取代 `meta.APIType == apitype.OpenAI`。未翻译的上游家族（Gemini、Baidu、Bedrock 等）解析为 `unsupported`，仍然服务 `/v1/chat/completions`（走它自己的 adaptor），只有两个需要改写请求体的协议入口不可达，返回具名 `upstream_protocol_unsupported`。
+- **同协议即直通**：`client == up` 时不解析、不重渲染，原生字节双向转发。这是保住 `cache_control`、`thinking`、hosted tools 与未知字段的唯一办法，也是"六个跨协议格子必然有损、三个同协议格子必然无损"这一取舍的来源。
+- **跨协议必经 codec**：codec 的输入输出都是既有渲染器已经在吃的形态（`*openai.TextResponse` / `sse.Chunk`），所以 `entry.Parse` / `entry.Render` / `entry.NewStream` 不需要按上游协议长分支。
+- **选渠道时按能力过滤**：上游协议进入渠道选择（内存缓存与库路径都先按客户端协议过滤再算优先级档位）。分组里混用协议时，不能服务该客户端协议的渠道在选中前就被排除，而不是发出去等 400——`Relay` 的重试对 400 不重试（`shouldRetry`），发出去就已经失败了。
 
 ## 7. 阶段 4：流式响应与 Usage 归一化
 

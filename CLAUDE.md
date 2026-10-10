@@ -76,7 +76,9 @@ ENGINE=mysql    bash scripts/smoke/migration_matrix.sh
 - `/v1/responses` → `RelayResponsesHelper`, `/v1/messages` → `RelayMessagesHelper` (both via `relayProtocolHelper`)
 - images → `RelayImageHelper`, proxy → `RelayProxyHelper`
 
-`Relay` also owns retry: on a retryable `bizErr` it re-selects a different channel, re-seeds `c.Request.Body` from a buffered copy, and re-enters `relayHelper`. Error paths emit metrics and may auto-disable the channel via `monitor`.
+The two protocol entry points share `relayProtocolHelper`, which branches three ways before parsing anything: an upstream protocol that cannot serve this client protocol → named 400; the **same** upstream protocol → `relayPassthrough` (the client's own bytes, never through `entry.Parse`); a **different** one → `upstreamCodecFor` picks a codec, and only then does `entry.Parse` run. The branch order matters — the capability answer does not depend on the parsed form, and the passthrough branch must be reached with the client's body untouched.
+
+`Relay` also owns retry: on a retryable `bizErr` it re-selects a different channel, re-seeds `c.Request.Body` from a buffered copy, and re-enters `relayHelper`. Error paths emit metrics and may auto-disable the channel via `monitor`. Channel selection is filtered by client protocol — a group may mix upstream protocols, and a channel that cannot serve the client's protocol is never selected (so a 400 from a mismatched channel does not need to be retried: it cannot happen).
 
 Both the chat path and the protocol path end by writing the usage fact (`recordUsage` → `usagelog.Default().RecordOnce`) and the legacy consumption log. These run in goroutines after the response is written.
 
@@ -86,15 +88,23 @@ Both the chat path and the protocol path end by writing the usage fact (`recordU
 
 `ConvertRequest` translates a normalized `model.GeneralOpenAIRequest` into the upstream shape; `DoResponse` parses the upstream reply back into `*model.Usage` plus an error. `getRequestBody` in `text.go` has a fast path that forwards the raw client body untouched when no conversion is needed — it is skipped when the model name is mapped, the channel is Baichuan, a forced system prompt exists, `ENFORCE_INCLUDE_USAGE` is on, or a per-model override mutated the request.
 
+One adaptor family has a companion package that is *not* an adaptor: `relay/adaptor/openai_responses/` is a sink-agnostic conversion library (chat shape ⇄ Responses native shape) with no `Adaptor` implementation and no gin/meta awareness, so the chat path and the protocol path's codec both drive the same translation. `relay/adaptor/anthropic` plays the same role for Messages, but through its adaptor methods.
+
 ### Client protocols vs upstream protocols
 
-`/v1/responses` (OpenAI Responses) and `/v1/messages` (Anthropic Messages) are **client-facing** protocols. `relay/protocol/*.go` parses them into the same `GeneralOpenAIRequest` intermediate, then `relayProtocolHelper` rewrites the call as a canonical `/v1/chat/completions` request and requires `meta.APIType == apitype.OpenAI` — non-OpenAI-compatible upstreams are rejected with `upstream_protocol_unsupported` rather than guessed at. Responses are rendered back into the client's envelope by `protocol.RenderMessages` / `RenderResponses`.
+There are three of each, and a client protocol may be served by any upstream protocol — a 3×3 matrix. The upstream side is `relay/upstream.Protocol`: `openai-chat`, `openai-responses`, `anthropic-messages`, plus `compatible` (chat-shaped but not passthrough-safe) and a zero value `unsupported`. `Resolve(configured, apiType)` picks it — an explicit `ChannelConfig.upstream_protocol` wins, otherwise it is derived from `apitype`, otherwise `openai-chat`. `CanServe(client, up)` is the capability check that replaced the old hardcoded `meta.APIType == apitype.OpenAI` gate; `unsupported` can still serve `/v1/chat/completions` through its own adaptor and nothing else. Unsupported pairings are refused with `upstream_protocol_unsupported`, never guessed at.
+
+`relayProtocolHelper` then does one of three things (see "Relay request pipeline"): **passthrough** when `client == up` (`relay/controller/protocol_passthrough.go`), or a **codec** translation otherwise (`relay/controller/protocol_codec.go`).
+
+Passthrough forwards the client's bytes and the upstream's bytes, both untouched, so `cache_control`, `thinking`, hosted tool declarations, `previous_response_id` and unknown fields survive byte-for-byte. The two rewrites the gateway still owes the channel are *point patches* on a `map[string]json.RawMessage` — the model name, and the forced system prompt merged into the protocol's own top-level field (`system` for Messages, `instructions` for Responses). Nothing else is re-encoded. A configured override that cannot be applied to a native body is a named refusal, not a silent skip.
+
+Codec translation parses into the `GeneralOpenAIRequest` intermediate and renders back into the client's envelope via `entry.Render` / `entry.NewStream`, which only ever consume normalized forms — a codec's job is to produce `*openai.TextResponse` and `sse.Chunk` from whatever the upstream spoke. Translation is lossy in principle (`GeneralOpenAIRequest` has no slot for `cache_control`, `thinking` or hosted tools), so each conversion is expected to either map a field or refuse it by name.
 
 Streaming goes through `relay/sse` (`Reader`/`Writer`) and the typed emitters in `relay/protocol/stream_messages.go` / `stream_responses.go`, which the `protocolEntry.NewStream` factory selects. **Unsupported fields are rejected with a named error, never silently dropped** — the two documented exceptions are Responses' hosted tools and `store=true`, both dropped-with-debug-log because clients (e.g. Codex) set them by default.
 
 ### Usage fact layer
 
-`model/usage.go` owns the `usage_records` table. `request_id` is UNIQUE and `InsertUsageRecordOnce` makes writes idempotent, so retries and stream-finalize races cannot double-count. `relay/model/misc.go:NormalizeUsage` is the single normalizer for cache fields and is applied at record time.
+`model/usage.go` owns the `usage_records` table. `request_id` is UNIQUE and `InsertUsageRecordOnce` makes writes idempotent, so retries and stream-finalize races cannot double-count. It is first-write-wins *except* in one direction: an existing `error` row is overwritten by a later `success`/`partial` row for the same `request_id`, because a retry that succeeded must not leave the attempt's failure as the recorded terminal state. `relay/model/misc.go:NormalizeUsage` is the single normalizer for cache fields and is applied at record time.
 
 The invariant worth remembering: **`0`, `null` and `invalid` are three different things.**
 
@@ -111,7 +121,7 @@ Aggregation (`SummarizeUsage`, `SummarizeUsageByDay`, `SummarizeUsageBy`) comput
 
 ### Channel configuration
 
-`model.Channel.Config` is a JSON blob parsed into `ChannelConfig`: `proxy_url` (channel-scoped outbound proxy, empty = process default) and `model_configs` (per-model overrides keyed by post-mapping model name). `relay/controller/model_config.go:applyModelConfigOverrides` enforces them with strict "client wins" semantics — a value the client sent is never replaced and a blank admin field is never invented; `context_window` and disallowed input modalities are hard rejections, `max_output_tokens` is fill-in-only. When no override exists the relay keeps its untouched fast path. `controller/channel-fetch-models.go` probes the upstream `/models` endpoint to populate the whitelist (admin-only, persists nothing).
+`model.Channel.Config` is a JSON blob parsed into `ChannelConfig`: `proxy_url` (channel-scoped outbound proxy, empty = process default), `upstream_protocol` (the protocol the channel speaks, validated against `relay/upstream`'s name list on save — a typo must be an error, since silently falling back to `openai-chat` would divert the channel onto the translating path and drop hosted tools), and `model_configs` (per-model overrides keyed by post-mapping model name). The field lives inside the existing JSON blob, so it needs no `model/migration/` entry. It is backend/config-only for now — `web/default` has no UI for it. `relay/controller/model_config.go:applyModelConfigOverrides` enforces them with strict "client wins" semantics — a value the client sent is never replaced and a blank admin field is never invented; `context_window` and disallowed input modalities are hard rejections, `max_output_tokens` is fill-in-only. When no override exists the relay keeps its untouched fast path. `controller/channel-fetch-models.go` probes the upstream `/models` endpoint to populate the whitelist (admin-only, persists nothing).
 
 ### Frontend (`web/default`)
 

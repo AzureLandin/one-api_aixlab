@@ -167,6 +167,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ### §6.6 上游协议选择
 - 阶段 3 两个入口仅支持 **OpenAI 兼容上游**（`meta.APIType==apitype.OpenAI`）；其他渠道类型返回明确 `upstream_protocol_unsupported`，不猜测、不静默降级。多上游协议矩阵在阶段 4+ 扩展。
+  - **（阶段 8 作废）** 该硬编码闸门已被 `upstream.CanServe` 取代，三种客户端协议 × 三种上游协议全部可达；见「阶段 8：跨协议矩阵」。
 - 客户端协议 ≠ 上游协议：入口只负责“客户端 JSON ↔ 统一中间结构 ↔ 规范 OpenAI 响应 ↔ 客户端渲染”，中间结构 `GeneralOpenAIRequest` 与既有分发/适配层解耦。
 
 ### 明确限制（阶段 4 收口）
@@ -202,7 +203,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - §7.3 客户端断开：`ctx.Err()`/写失败→停止写、关闭上游、`recordUsage` 以 `partial` 收尾一次。
 
 ### 明确限制（后续阶段）
-- **仅 OpenAI 兼容上游流式**：与阶段 3 一致，非 OpenAI 上游仍返回 `upstream_protocol_unsupported`；Anthropic/AWS 等原生上游协议矩阵在后续扩展。
+- **仅 OpenAI 兼容上游流式**：与阶段 3 一致，非 OpenAI 上游仍返回 `upstream_protocol_unsupported`；Anthropic/AWS 等原生上游协议矩阵在后续扩展。**（阶段 8 作废）** 矩阵已补齐，Anthropic 与 Responses 上游的流式各有自己的累积器与直通镜像路径。
 - **`/v1/chat/completions` 既有透传未改动**：仍走 `openai.StreamHandler` 原样透传（含 reported/estimated usage 收尾），避免破坏大量渠道；新 `sse` 层与 typed 渲染当前只服务 `/v1/responses`、`/v1/messages`。chat 路径的 `partial`/错误不吞如需统一到 `sse` 层，留待评估后再迁移（改动面大）。
 - 缓存字段归一化与三指标贯通 adaptor 属阶段 5。
 
@@ -275,12 +276,13 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## §13 终局验收清单
 
-逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(45/0)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
+逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(109/0，阶段 8 口径)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
 
 - [x] 新请求路径没有额度预扣/扣除/退款/额度不足判断 — 阶段 2（`relay/billing/billing.go` 删除、预扣/退款/不足拒绝全部移除）；冒烟 “relay 200 with zero quota”、“user/token/channel 旧列 untouched”。
 - [x] 新请求路径没有模型/分组倍率计费 — 阶段 2（`billingratio` 仅保留名称枚举用途，不参与计费）。
-- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 “usage_records success/reported 7/5/12”、6 条 success 行。
-- [x] usage 写入按 `request_id` 幂等 — `InsertUsageRecordOnce` + `usage_records.request_id UNIQUE`；迁移集成测试对三种方言断言“同 request_id 二次写入被拒”。
+- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 22 条 success 行、全部 `usage_source=reported`、`cache_usage_status` 计数 **22 reported / 15 not_reported**（阶段 8 口径；直通与跨协议格子各自走自己的收尾阶梯）。
+- [x] usage 写入按 `request_id` 幂等 — `InsertUsageRecordOnce` + `usage_records.request_id UNIQUE`；迁移集成测试对三种方言断言“同 request_id 二次写入被拒”。阶段 8 起唯一例外：已有 `error` 行可被后到的 `success`/`partial` 覆盖（反之不可），使重试成功的请求不会留下首次尝试的失败为终态；单测覆盖两向与并发。
+- [x] 渠道选择不把请求发给不能服务该客户端协议的渠道 — 阶段 8（决策 ②）：上游协议进入内存缓存与库路径，先按能力过滤候选再算优先级档位；`ErrNoChannelForProtocol` 与 `ErrChannelNotFound` 可区分。`model/channel_select_test.go` 4 例。
 - [x] 用户 Token 汇总可查询 — `/api/usage/{summary,trend,by-user,by-model,by-channel,by-token}` + `/self` 变体；冒烟 `/api/usage/summary` 三指标校验；Dashboard 消费（阶段 6）。
 - [x] `/v1/chat/completions` 正常 — 冒烟 relay 200 + body（旧流式路径不回归）。
 - [x] `/v1/responses` 正常 — 冒烟 responses 非流式/拒绝项/流式 typed SSE/reported usage。
@@ -289,8 +291,8 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 三种协议流式错误不被吞掉 — `relay/sse` 状态机 `UpstreamErrorNotSwallowed`、`MalformedChunkReturnsError`、`PartialOnAbortAndNoDone`；controller 错误分支 `stream.Error` 终局。
 - [x] 工具参数增量不丢失或串台 — `TestState_ToolArgsGroupedByIndex` + `stream_test` 按 index 分组、不拼接。
 - [x] Prompt Caching 字段被正确归一化 — 阶段 5（`NormalizeUsage`：read/write、nil→not_reported、ptr-0→reported、非法→invalid 保原值）。
-- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=3/7`。
-- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 5 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。
+- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=169/221`（阶段 8 口径）。
+- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 15 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。同协议直通格子里的 `input_tokens_details.cached_tokens` 与跨协议格子走同一条 `NormalizeUsage`，不存在“直通路径绕过缓存归一化”的旁路。
 - [x] Dashboard 显示命中率和覆盖率 — 阶段 6 三指标卡（命中率/调用命中率/覆盖率）。
 - [x] 前端无余额、充值、倍率和费用文案 — 阶段 6 删除 46 个无引用费用键、改写 5 处残留文案、移除 `renderQuota*`；脚本复测引用键中费用词命中为 0。
 - [x] 数据库迁移可重复执行 / 有幂等保护 — `migration.Migrate` 跳过已应用版本；迁移集成测试连跑 3 次 bookkeeping 恒为 {1,2} 不重复；矩阵重启后 `schema_migrations=1,2`。
@@ -299,7 +301,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 迁移中断重试、重复执行、备份恢复均验证 — 集成测试重复 Migrate x3（中断重试等价）；矩阵备份(drop+restore)恢复；重启幂等。
 - [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
 
-**总门禁**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l`（relay model middleware controller router model/migration）✅ 空 · `go test`（排除存量红 `common/image`）12 包 ✅ · 端到端冒烟 `pass=45 fail=0` ✅ · 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+**总门禁**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l`（relay model middleware controller router model/migration）✅ 空 · `go test`（排除存量红 `common/image`）✅ · 端到端冒烟 `pass=109 fail=0` ✅（阶段 8 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
 
 ---
 
@@ -337,3 +339,89 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 5. **F5（验证与验收）**：
    - 前端构建验证：`npm run build` 成功通过（exit 0），无新增 warning。
    - 容器热更新验证：打包最新 Docker 镜像并部署，验证主站根路径、`/usage` 路由与 API 正常加载。
+
+---
+
+## 阶段 8：跨协议矩阵（对齐 new-api）
+
+### 完成时间
+2026-10-10。分支 `feat/cross-protocol-matrix` 共 12 个提交：4 个前置（`254ddcf`/`6bfdbe2` 工具调用修复、`29f27bf` 冒烟断言、`b587d14` CLAUDE.md）+ 本阶段的 8 个（A1 `0bc836a` … A7 `12a4772`）。
+
+### 立项缘由
+一次工具调用缺陷修复（`254ddcf`、`6bfdbe2`）验收后，核对参考实现 new-api 时列出四处**有意偏离**，用户要求「全部都按 new-api 的来」。其中两处是独立子系统：① `/v1/responses` 与 `/v1/messages` 只接受 OpenAI 兼容上游（`upstream_protocol_unsupported` 在 new-api 全仓零命中）；② 服务端工具（hosted tools）硬拒，而 new-api 有完整支持。本阶段交付 ①，②（hosted tools）留作阶段 9。
+
+### 前提修正
+立项时的三个假设被逐条推翻，记在此处以免重蹈：
+
+1. **闸门不是唯一障碍。** `DoRequestHelper` 只做 URL + 头 + 发请求，不做转换；协议路径是 `json.Marshal(normalized)` 后直接交给 `adaptor.DoRequest`。所以拆掉闸门得到的是「把 chat 请求体 POST 到 Anthropic 的 `/v1/messages`」，是坏请求而非可用转换。响应侧同样硬编码 OpenAI（`readOpenAIUsage` 只解 `openai.TextResponse`，`relayProtocolStream` 只调 `sse.ParseChunk`），原生 SSE 会解析成空 chunk，文本/finish_reason/usage 全部静默丢失。
+2. **`InsertUsageRecordOnce` 是首写生效。** 配合 `Relay` 的重试循环，第 1 次尝试写的 error 行会挡掉第 2 次成功写的 success 行——请求成功却记为 error。既存缺陷，矩阵会放大它（见 A2）。
+3. **400 不重试。** `shouldRetry` 对 400 返回 false，所以「渠道不支持该客户端协议」的 400 不会触发换渠道。这正是决策 ② 必须在**选渠道阶段**过滤而非靠重试兜底的原因。
+
+### 已确定的范围与决策
+
+| 维度 | 结论 |
+| --- | --- |
+| 上游协议 | `openai-chat`（已支持）、`anthropic-messages`（adaptor 有双向转换，但从协议入口够不着）、`openai-responses`（全新） |
+| 客户端协议 | 不变，三种 |
+| 同协议配对 | **直通**：不解析、不重渲染，原生字节转发 |
+| hosted tools | 全部类型（阶段 9） |
+| ① 重试与用量记录 | **终态可覆盖 error 行**：同一 `request_id` 已有 error 行时，允许 success/partial 覆盖 |
+| ② 分组混用协议 | **选择渠道时按能力过滤** |
+| ③ `upstream_protocol` 界面 | **先只做后端**，用 API/配置设置；`web/default` 界面后续阶段 |
+
+### 矩阵落点（交付后）
+
+| ↓ 上游 / → 客户端 | chat/completions | responses | messages |
+| --- | --- | --- | --- |
+| openai-chat | chat 路径（raw 快路径） | codec 翻译 | codec 翻译 |
+| anthropic-messages | chat 路径（adaptor 转换） | codec 翻译 | 直通 |
+| openai-responses | chat 路径（`text_responses.go`） | 直通 | codec 翻译 |
+
+直通格子的取舍是这一阶段的支点：三个同协议配对**零新代码**地带过 `cache_control`、`thinking`、hosted tools 与未知字段；代价是六个跨协议格子必然有损，于是唯一剩下的问题变成「有损是否具名」。
+
+### 逐提交记录
+
+| 提交 | 内容 |
+| --- | --- |
+| `0bc836a` | **A1** 上游协议概念：`relay/upstream`（`Protocol` + `Resolve`/`CanServe`/`Passthrough`/`Valid`）；`ChannelConfig.UpstreamProtocol`（在既有 JSON blob 内，**零 schema 变更、无迁移条目**）；保存时白名单校验。无消费者，纯地基。 |
+| `1babfcc` | **A2** 决策 ①：`InsertUsageRecordOnce` 允许 success/partial 覆盖既有 error 行，反向不覆盖；事务内 UPDATE，其余仍幂等跳过。 |
+| `1033380` | **A3** 决策 ②：协议进入内存缓存（`ChannelEntry{Channel, Protocol}`）与库路径；**先过滤后算优先级档位**——顺序反过来会让被过滤空的档位走到 `rand.Intn(0)` panic。顺带修正 A1 的缺陷：原矩阵对 `unsupported` 上游全列 false，会把 Gemini/Baidu 渠道从 `/v1/chat/completions` 上也一并摘掉。 |
+| `b3488f7` | **A4** 同协议直通 + 闸门替换：`relay/controller/protocol_passthrough.go`，`relayProtocolHelper` 中插在 `entry.Parse` 之前。请求投影是**定点补丁**（`map[string]json.RawMessage`，只换 `model` 并合并强制 prompt），`sse.Reader`/`Writer.Raw` 镜像。顺带修 `anthropic-beta` 头由覆盖改为合并。 |
+| `55ff412` | **A5** 编解码器泛化：`relay/controller/protocol_codec.go`，`openaiChatCodec` 保持逐字节等价（有差分测试），`anthropicChatCodec` 复用 adaptor 的转换函数而不重写。顺带把 `Resolve` 对 `AwsClaude` 的判定从 `anthropic-messages` 改为 `unsupported`（见「已知修正」）。 |
+| `a384d0b` | **A6a** `relay/adaptor/openai_responses/`：与 sink 无关的 chat ⇄ Responses 转换库（请求、非流式、流式），无调用方。 |
+| `e0ff956` | **A6b** 接线：chat 路径分支 + `openaiResponsesCodec`；两条路共用同一个读流器，客户端看到的流与落库的事实同源。 |
+| `12a4772` | **A7** Responses 同协议直通：矩阵最后一格。`passthroughProtocols` 表取代硬编码 switch 与 `upstream_protocol_not_implemented`；`projectNativeRequest`、`mirrorUpstreamStream`、`readUpstreamBody`/`writeUpstreamBody`/`closeUpstreamBody` 抽成两份协议共用；`responsesMirror` 从终态信封的 `response.usage` 取用量。 |
+
+提交拆分沿用「地基/接线分离」：A1 与 A6 各自可独立回滚（A6 拆成 a/b，与计划的单提交有别，理由与 A1 同）。迁移/协议/UI 改动各自独立提交。
+
+### 已知修正与已知有损
+
+- **`AwsClaude` 判定修正（`55ff412`）**：Bedrock 的 body 形状像 Messages，但走 SDK `InvokeModel` 加自己的 envelope。判成 `anthropic-messages` 会让它通过 `CanServe` 与 A3 的渠道过滤，然后在 `aws.DoRequest` 返回 `(nil, nil)` 上 nil 解引用——500 而不是具名 400。现在落 `unsupported`，它照旧在 `/v1/chat/completions` 上工作。这也是「apitype 推导」需要显式例外表的证据。
+- **`thinking` 在跨协议格子丢失**：OpenAI 归一化形态里没有槽位（与既有 chat pivot 同因）。冒烟用「输出只含 text 块内容」把这条损失钉住，不让它无声消失。`cache_control` 同理——所以直通才是需求的大头。
+- **`validateChannelConfig` 只管名字**：它校验 `upstream_protocol` 是不是已知名字，不管它与渠道族是否相容。管理员可以在 Anthropic/Gemini/Bedrock 渠道上声明 `openai-responses`，然后收到一个按另一套协议拼出来的 URL 和目标不认识的请求体（静默失败）。`e0ff956` 新增 `responsesUpstreamSupported`，在 chat 分支与 `upstreamCodecFor` 两处按名字拒绝（400 `upstream_protocol_unsupported`）；**相容性检查仍是逐处判断，不是一张表**——阶段 9 应把它收成一处。
+- **`stream_options` 不下发 Responses 上游**：Responses 无此字段且总是报 usage，拒绝反而会打断默认设置它的客户端。
+
+### 用量不变量（直通路径同样适用）
+
+- 直通流与大水箱路径**落同一套 reported / estimated / not_reported 三态**：上游报了就用（`reported`），什么都没报但流出过文本就本地估算（`estimated`），既没报又没流出任何东西则返回 nil 只记状态——上游发 `response.failed` 而没有任何 output 时，不该伪造一行「prompt+0」的估算。
+- Anthropic 的 `message_delta.usage.output_tokens` 是**累计值，赋值不是 `+=`**；`message_start` 的缓存字段取「最新非 nil」而非累加。nil 缓存字段保持 nil，**绝不归零**。
+- 协议路径的 `bodyErr` 为 4xx 时不写 usage 行（请求从未发出），5xx 仍按既有规则记一行 error。
+
+### 已知偏离（遗留，非本阶段引入）
+
+- **预检级拒绝会写 error 行。** `relay/controller/protocol.go` 的能力不符分支（`upstream_protocol_unsupported`）与 A4 的直通投影失败路径都会 `recordUsage(..., UsageStatusError)`，而本文档 §「明确限制（阶段 4 收口）」记的规则是「未真正发起生成则不写 error 行」。两者冲突，属 A4 引入直通时就存在的行为。**有意留到文档收口阶段处理，不在 A7 扩大范围**——修它要动 `recordUsage` 的调用点分布，与矩阵无关。
+- 直通路径上 `applyModelConfigOverrides` 无法照搬（它操作 `GeneralOpenAIRequest`）：当前行为是投影 `model` 与强制 prompt，配置了却无法在原生 body 上施加的覆盖项**具名拒绝**（`model_config_override_needs_normalization`），不静默忽略。`context_window` 的原生强制暂列为限制。
+
+### 测试与验收
+
+- **单测**：`relay/upstream/protocol_test.go`（`Resolve` 优先级、`CanServe` 全矩阵、非法配置拒绝）；`model/channel_select_test.go`（按协议过滤、过滤后才算优先级档位、无约束客户端仍能选中未翻译渠道、错误种类可区分）；`model/usage_test.go`（error→success 覆盖、反向不覆盖、并发仍只有一行）；`relay/controller/protocol_passthrough_test.go`（Messages 与 Responses 各自的逐字节投影保留、只改 `model`、强制 prompt 替换、覆盖项拒绝、缺 `model` 拒绝，以及两套 mirror 的 reported/estimated/nil 阶梯、缓存指针语义、终态判定）；`relay/controller/protocol_codec_test.go`（`openaiChatCodec` 与历史内联循环的差分等价、Anthropic codec 与 adaptor 产物一致、Responses codec 七例）；`relay/adaptor/openai_responses/`（请求往返与 14 项拒绝表、用量指针语义、finish_reason 映射、流式稠密 tool index、`OutputText` 计数范围）。
+- **冒烟**：`mock_upstream.py` 增加 `/v1/messages`（Anthropic 非流式 + 真实 SSE 序列，含 `message_start` 缓存字段与 `thinking` block）与 `/v1/responses`（非流式 + `response.*` SSE 序列，工具格子参数分片故意交错）；新增 16e/16f/16g 三组格子覆盖全部九个矩阵位置与能力拒绝格子。硬编码计数**刻意更新**并保持精确相等（非 `>=`）：`RESULT pass=109 fail=0`。
+- **命令**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l $(git ls-files '*.go')` 空 ✅ · `go test $(go list ./... | grep -v common/image)` ✅ · `bash scripts/smoke/run_smoke.sh` → `pass=109 fail=0` ✅。`common/image` 的 jpeg 失败是 §0.3 既存红线，未折进任何提交。
+
+### 剩余限制（阶段 9 输入）
+
+1. **hosted tools 跨协议**：`messages`/`responses` → `openai-chat` 时 Chat 协议没有 hosted tool 的位置，诚实结局是**具名拒绝**（`hosted_tool_unsupported_by_upstream`）而非现在的 debug 丢弃；`messages` ↔ `responses` 映射重叠子集，其余按名字拒绝。需要 `protocolStream` 增加 hosted 逃生舱（现有 `Chunk`/`Finish`/`Error` 无处安放），以及 `anthropic` 结构体扩 `server_tool_use`/`web_search_tool_result`/`citations`/`thinking`。
+2. **跨协议配对的流式 hosted 交错**预期要**每个配对一座桥**，而不是一个通用机制。
+3. **`upstream_protocol` 与渠道族的相容性检查**应收成一处表。
+4. **预检级拒绝的 usage 行**规则需要与 §「明确限制（阶段 4 收口）」统一（见「已知偏离」）。
+5. **前端 `upstream_protocol` 编辑界面**（决策 ③ 的后半）。
