@@ -227,6 +227,30 @@ func TestToChatResponseRefusesACallWithoutAnyId(t *testing.T) {
 	}
 }
 
+// OutputText is what the local estimate is counted from when an upstream reports
+// no usage at all: the answer's words and its tool-call arguments, and nothing
+// that is not part of the answer (a reasoning summary is display-only here, as
+// it is everywhere else in the relay).
+func TestOutputTextCountsWordsAndToolArguments(t *testing.T) {
+	resp := &Response{
+		Status: "completed",
+		Output: []OutputItem{
+			{Type: "message", Content: []OutputContent{{Type: "output_text", Text: "ok"}}},
+			{Type: "reasoning", Summary: []OutputContent{{Type: "summary_text", Text: "thinking hard"}}},
+			{Type: "function_call", ID: "fc_1", CallId: "call_A", Name: "alpha", Arguments: `{"city":"sh"}`},
+			{Type: "web_search_call"}, // a hosted item carries no text this gateway counts
+		},
+	}
+
+	got := OutputText(resp)
+	if got != `ok{"city":"sh"}` {
+		t.Fatalf("OutputText = %q, want the text followed by the arguments", got)
+	}
+	if OutputText(nil) != "" {
+		t.Fatal("a nil answer has no text")
+	}
+}
+
 func TestFailureReadsOnlyAFailedStatus(t *testing.T) {
 	if e := (&Response{Status: "completed"}).Failure(); e != nil {
 		t.Fatalf("a completed answer is not a failure: %+v", e)
@@ -238,7 +262,6 @@ func TestFailureReadsOnlyAFailedStatus(t *testing.T) {
 		t.Fatalf("the upstream's own error must be carried through, got %+v", e)
 	}
 }
-
 func TestChatIDForRoundTripsAResponsesID(t *testing.T) {
 	cases := map[string]string{
 		"resp_abc":    "chatcmpl-abc",

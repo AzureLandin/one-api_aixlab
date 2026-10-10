@@ -147,6 +147,28 @@ func (r *Response) Failure() *relaymodel.Error {
 	return e
 }
 
+// OutputText is the answer's own words and its tool-call arguments,
+// concatenated: the text a local token estimate is counted from when an upstream
+// reports no usage at all. Counting the arguments too keeps a tool-only answer
+// from being estimated as empty, and mirrors what a streamed answer contributes
+// (sse.StreamState.ResponseTextForUsage counts the same two), so a silent
+// upstream yields the same estimate whichever shape its answer arrived in.
+func OutputText(resp *Response) string {
+	if resp == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			b.WriteString(itemText(item))
+		case "function_call":
+			b.WriteString(argumentsString(item.Arguments))
+		}
+	}
+	return b.String()
+}
+
 // answer is the decoded answer: the assistant text, any reasoning summary, the
 // tool calls, and the output item types this gateway could not place.
 type answer struct {

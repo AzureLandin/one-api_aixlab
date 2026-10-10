@@ -17,7 +17,9 @@ rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_pass_msg_sse.txt tmp_pass_reject.json tmp_pass_chat.json mock_last_messages.json \
       tmp_xlate_resp.json tmp_xlate_resp_sse.h tmp_xlate_resp_sse.txt mock_last_responses.json \
       tmp_ch_responses.json tmp_chat_resp.json tmp_chat_resp_sse.txt tmp_msg_resp.json \
-      tmp_msg_resp_sse.txt tmp_tool_chatresp.json tmp_tool_msgresp.json tmp_cache_resp.json
+      tmp_msg_resp_sse.txt tmp_tool_chatresp.json tmp_tool_msgresp.json tmp_cache_resp.json \
+      tmp_pass_resp.json tmp_pass_resp_cache.json tmp_pass_resp_sse.h tmp_pass_resp_sse.txt \
+      tmp_pass_resp_tools_sse.txt
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -488,6 +490,99 @@ sleep 1
 CR=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
 check "responses cached_tokens→reported cache_read=3" "reported|3|reported" "$CR"
 
+# 16g. 第二个直通格子：/v1/responses 客户端 → 声明 openai-responses 的上游。
+#      16f 的四个格子都是跨协议翻译（客户端说的是别的协议），这里客户端说的就是 Responses，
+#      于是走直通：请求体原样过去（只补 model），上游的信封与事件原样回来，usage 由镜像
+#      从终态 response.completed 的 response.usage 取。previous_response_id 是转换路径
+#      明确拒绝的字段（responses.go 的解析器不接受它），能被原样送到上游正是直通的意义。
+PASS_RESP_HEAD='{"model":"gpt-5-mock","instructions":"be brief","store":true,"previous_response_id":"resp_prev","include":["reasoning.encrypted_content"],"text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object"}}},'
+PASS_RESP_BODY='"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}'
+
+# 16g-1 非流式：客户端收到的是上游自己的信封，不是重新渲染的
+CODE=$(curl -s -o tmp_pass_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$PASS_RESP_HEAD$PASS_RESP_BODY")
+check "passthrough responses 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: passthrough forwards the upstream envelope"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_pass_resp.json)"; fail=$((fail+1)); }
+import json,sys
+raw=open('tmp_pass_resp.json').read()
+d=json.loads(raw)
+u=d.get('usage') or {}
+ok=(d.get('id')=='resp_mock' and d.get('object')=='response' and d.get('status')=='completed'
+    and [i.get('type') for i in d.get('output',[])]==['message']
+    and d['output'][0]['content'][0].get('text')=='ok'
+    and (u.get('input_tokens'),u.get('output_tokens'),u.get('total_tokens'))==(7,5,12))
+# 逐字节回写：上游 payload 里的空白（json.dumps 的 ", " / ": "）也原样抵达客户端，
+# 任何一次 Go 侧重新序列化都会去掉它们。
+ok = ok and '"object": "response"' in raw and '"status": "completed"' in raw
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+PR=$(sqlite3 one-api.db "select status||'|'||usage_source||'|'||input_tokens||'|'||output_tokens||'|'||total_tokens||'|'||cache_usage_status from usage_records order by id desc limit 1;")
+check "passthrough responses non-stream usage fact" "success|reported|7|5|12|not_reported" "$PR"
+
+# 16g-2 上游收到的是客户端自己的字节：只补过 model
+python3 - <<'PY' && { echo "PASS: upstream requests kept the client's native fields"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+ok=(b.get('model')=='gpt-5-mock' and b.get('instructions')=='be brief'
+    and b.get('store') is True and b.get('previous_response_id')=='resp_prev'
+    and b.get('include')==['reasoning.encrypted_content']
+    and b['text']['format']['type']=='json_schema'
+    and b['input'][0]['content'][0]['type']=='input_text'
+    and 'messages' not in b)
+sys.exit(0 if ok else 1)
+PY
+
+# 16g-3 流式：逐事件镜像上游 SSE，无 [DONE] 尾标
+curl -s -N -D tmp_pass_resp_sse.h -o tmp_pass_resp_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "${PASS_RESP_HEAD}\"stream\":true,${PASS_RESP_BODY}"
+grep -qi 'text/event-stream' tmp_pass_resp_sse.h \
+  && { echo "PASS: passthrough responses stream content-type"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 200 tmp_pass_resp_sse.h)"; fail=$((fail+1)); }
+grep -q 'event: response.created' tmp_pass_resp_sse.txt \
+  && grep -q 'event: response.output_text.delta' tmp_pass_resp_sse.txt \
+  && grep -q 'event: response.completed' tmp_pass_resp_sse.txt \
+  && { echo "PASS: passthrough mirrors upstream response.* events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_pass_resp_sse.txt)"; fail=$((fail+1)); }
+grep -qF 'data: {"type": "response.output_text.delta"' tmp_pass_resp_sse.txt \
+  && { echo "PASS: upstream event bytes mirrored verbatim"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_pass_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '\[DONE\]' tmp_pass_resp_sse.txt \
+  && { echo "FAIL: [DONE] leaked into a Responses stream"; fail=$((fail+1)); } \
+  || { echo "PASS: no OpenAI [DONE] marker in responses stream"; pass=$((pass+1)); }
+sleep 1
+PRS=$(sqlite3 one-api.db "select status||'|'||usage_source||'|'||input_tokens||'|'||output_tokens||'|'||total_tokens from usage_records order by id desc limit 1;")
+check "passthrough responses stream usage fact" "success|reported|7|5|12" "$PRS"
+
+# 16g-4 工具调用：两个 function_call 项（含 call_id）与交错的参数分片原样镜像
+RESP_TOOLS='[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}},{"type":"function","name":"get_time","parameters":{"type":"object"}}]'
+curl -s -N -o tmp_pass_resp_tools_sse.txt -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"gpt-5-mock\",\"stream\":true,\"tools\":$RESP_TOOLS,\"input\":\"weather?\"}"
+python3 - <<'PY' && { echo "PASS: responses tool items and argument fragments mirrored in upstream order"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 500 tmp_pass_resp_tools_sse.txt)"; fail=$((fail+1)); }
+import json,sys
+txt=open('tmp_pass_resp_tools_sse.txt').read()
+ids=[]
+for line in txt.splitlines():
+    if not line.startswith('data: ') or 'function_call_arguments.delta' not in line:
+        continue
+    ids.append(json.loads(line[6:]).get('item_id'))
+# 上游先发第二个调用的首片：直通按上游自己的顺序镜像（翻译路径必须重排成稠密 index）
+ok=(ids==['fc_mock_b','fc_mock_a','fc_mock_b','fc_mock_a']
+    and '"call_id": "call_mock_a"' in txt and '"call_id": "call_mock_b"' in txt)
+sys.exit(0 if ok else 1)
+PY
+sleep 1
+PRT=$(sqlite3 one-api.db "select status||'|'||usage_source||'|'||input_tokens||'|'||output_tokens||'|'||total_tokens from usage_records order by id desc limit 1;")
+check "passthrough responses tool-use usage fact" "success|reported|11|9|20" "$PRT"
+
+# 16g-5 Responses 直通的缓存字段：input_tokens_details.cached_tokens → cache_read_input_tokens
+CODE=$(curl -s -o tmp_pass_resp_cache.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","input":"usecache please"}')
+check "passthrough responses cache 200" 200 "$CODE"
+sleep 1
+PRC=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
+check "passthrough responses cached_tokens→reported cache_read=3" "reported|3|reported" "$PRC"
+
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
@@ -495,30 +590,31 @@ check "responses cached_tokens→reported cache_read=3" "reported|3|reported" "$
 #     + 跨协议 responses→anthropic 非流式(1) + 流式(1) = 11
 #     + responses 上游：chat→responses 非流式(1) + 流式(1) + 工具(1)
 #       + messages→responses 非流式(1) + 流式(1) + 工具(1) + 缓存(1) = 18
+#     + 直通 responses 非流式(1) + 流式(1) + 工具流式(1) + 缓存(1) = 22
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 18 ] && { echo "PASS: usage_records 18 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 22 ] && { echo "PASS: usage_records 22 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 18 ] && { echo "PASS: all 18 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 22 ] && { echo "PASS: all 22 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 #     跨协议格子与 responses 上游上报缓存的那条都计入 reported，所以计数不变——这同时是
 #     "没上报才写 not_reported"的反面证据。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 12 ] && { echo "PASS: 12 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行 6 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
-#     + 1 条 Responses input_tokens_details（3）
+[ "$NR" = 15 ] && { echo "PASS: 15 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+# 20. §8.1 上报缓存的行 7 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
+#     + 2 条 Responses input_tokens_details（各 3：翻译路径 1 条 + 直通 1 条）
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 6 ] && { echo "PASS: 6 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 166/214（3+40×4+3 命中 / 7+50×4+7 上报输入）；coverage = 6/18
+[ "$RCC" = 7 ] && { echo "PASS: 7 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 169/221（3+40×4+3×2 命中 / 7+50×4+7×2 上报输入）；coverage = 7/22
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-166/214)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-6/18)<1e-9 and d['cache_read_input_tokens']==166
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==12)
+ok=(abs(d['cache_hit_rate']-169/221)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-7/22)<1e-9 and d['cache_read_input_tokens']==169
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==15)
 sys.exit(0 if ok else 1)
 PY
 
