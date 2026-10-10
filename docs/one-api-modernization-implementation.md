@@ -411,7 +411,7 @@ request id
 - `store` 默认按 `false` 处理；`store=true` 忽略并 debug 记录（`relay/protocol/responses.go:103`；客户端如 Codex 默认会带，硬拒会打断它），不做服务端响应持久化。
 - 收到 `previous_response_id` 时返回不支持错误。
 - 收到后台任务参数（`background=true`）时返回不支持错误。
-- `tools` 中的内置（hosted）工具类型**不再丢弃**：`web_search*` 抽成托管声明并按目标协议映射（chat 目标折成 `web_search_options`，Anthropic 目标折成 `web_search_20250305`），`mcp` 与其余 `native` 类按渠道策略处置而非无声丢弃。见 §6.7。
+- `tools` 中的内置（hosted）工具类型**不再丢弃**：`web_search*` 抽成托管声明并按目标协议映射（chat 目标折成 `web_search_options`，Anthropic 目标折成 `web_search_20250305`），`mcp` 与其余 `native` 类按渠道策略处置而非无声丢弃。见 §6.7。`{"type":"custom"}` 的自由格式工具也不丢弃，而是降级成单 `input` 字符串的函数，见 §6.8。
 
 **同协议时**（Responses 客户端 → Responses 上游）走直通，以上限制**全部不适用**：原生 body 原样转发，`store`、`previous_response_id`、`include`、`reasoning`、`text.format`、hosted 工具声明与未知字段逐字节到达上游；网关只定点补丁顶层 `model` 与强制 prompt（并入 `instructions`）。
 
@@ -473,7 +473,7 @@ compatible
 
 **包归属。** 纯类型、kind 表与策略在 `relay/model/hosted.go`，不依赖任何 adaptor：`relay/protocol` 只依赖 `relay/model` + `relay/sse`，若把 kind 表挪进一个依赖 adaptor 的新包，就会为了让 `relay/protocol` 查表而把它间接拖进 adaptor 依赖。需要 adaptor 的两件事分居两处——请求方向的挂载在 `relay/controller/hosted_attach.go`（chat 目标）、`relay/adaptor/openai_responses/request.go`（responses 目标）、`relay/adaptor/anthropic/main.go`（messages 目标）；流式响应方向的桥接在 `relay/controller/hosted_bridge.go`。
 
-**载体。** 中立数据挂在三个既有的归一化类型上，用 `json:"-"` 字段：`GeneralOpenAIRequest.Hosted`、`openai.TextResponse.Hosted`、`sse.Chunk.Hosted`。这样 `Parse` / `RequestBody` / `Render` / `protocolStream` 的签名全部不变，也不会泄漏进上游报文。守卫是 `sse.ParseChunk` 永不填充 `Hosted`、`StreamState.Absorb` 忽略它——托管流事件只能由 codec 写，不可能经 JSON 往返意外产生。
+**载体。** 中立数据挂在既有的归一化类型上，用 `json:"-"` 字段：`GeneralOpenAIRequest.Hosted`、`openai.TextResponse.Hosted`、`sse.Chunk.Hosted`；custom 工具（§6.8）另加 `GeneralOpenAIRequest.CustomTools` / `openai.TextResponse.CustomTools`。这样不会泄漏进上游报文，`Parse` / `RequestBody` / `Render` / `protocolStream` 的签名也都不变。**一处例外**：`streamFactory` 增加了 custom 工具集合参数——流式渲染器必须在第一个 chunk 之前就知道它，而那时还没有任何响应载体可以嫁接。守卫是 `sse.ParseChunk` 永不填充 `Hosted`、`StreamState.Absorb` 忽略它——托管流事件只能由 codec 写，不可能经 JSON 往返意外产生。
 
 **只有两种 kind 跨协议映射**：`web_search` 与 `mcp`。其余（computer use、bash、text editor、code execution、file search、image generation、web fetch、url context）一律是 `native`，走策略而不做映射。这张窄表是照参考实现的：`code_execution` 在 Responses 里没有 `container_id` 就无法表达，发明一个映射比具名记一次丢损更糟。
 
@@ -493,7 +493,7 @@ channel %d hosted_tool_loss: phase=%s code=%s path=%s %s
 
 `phase` 取 `request` / `response` / `stream`。“客户端不知道”是照参考实现有意为之；“运维不知道”不是。
 
-**诊断码**是 `relay/model/hosted.go` 里的常量，三个阶段共用：`unsupported_hosted_tool`、`unsupported_hosted_history`、`unsupported_search_limit`、`unsupported_domain_filter`、`duplicate_hosted_web_search`、`forced_tool_choice_downgraded`、`web_search_result_continuation_lost`、`web_search_response_unrepresentable`、`web_search_result_omitted`、`mcp_identity_missing`、`mcp_result_unrepresentable`、`mcp_result_missing`。
+**诊断码**是 `relay/model/hosted.go` 里的常量，三个阶段共用：`unsupported_hosted_tool`、`unsupported_hosted_history`、`unsupported_search_limit`、`unsupported_domain_filter`、`duplicate_hosted_web_search`、`forced_tool_choice_downgraded`、`web_search_result_continuation_lost`、`web_search_response_unrepresentable`、`web_search_result_omitted`、`mcp_identity_missing`、`mcp_result_unrepresentable`、`mcp_result_missing`，以及 §6.8 的 `custom_tool_as_function`、`custom_tool_name_conflict`。
 
 其中两个容易混为一谈，且语义相反：
 
@@ -512,6 +512,33 @@ channel %d hosted_tool_loss: phase=%s code=%s path=%s %s
 三个 identity 格子仍走直通，零新代码。**注意上表与阶段 8 计划稿的差异**：计划稿把 `messages` ← `openai-responses` 的响应方向写成 `web_search_call` → `server_tool_use` + `web_search_tool_result`，那是错的。Claude 的结果块必须携带 provider 加密结果，网关重建不出来，所以这条搜索只能整件丢弃并具名——参考实现也是这么做的（`web_search_response_unrepresentable`）。MCP 才是两个方向都能活下来的那一种。
 
 流式：`relay/controller/protocol.go` 的 `protocolStream` 增加 `Hosted(ev)`，`relayProtocolStream` 在分派 `Chunk` 之前先分派 `chunk.Hosted`。两座桥都是"坐在转换器前面的纯观察者"：`claudeHostedBridge` 按 index 闩住 `server_tool_use`/`mcp_tool_use` 的 `content_block_start`、吞掉其 `input_json_delta`、在 `content_block_stop` 时发出事件（此刻 input 才完整），并把结果块按 `tool_use_id` 折回同一件产物；`responsesHostedBridge` 把 `output_item.added`/`done` 与 `web_search_call.*`/`mcp_call.*` 进度事件折成 start/update/done 三段。**被认领的帧不再进转换器**，否则 `input_json_delta` 会漏成一个客户端从未声明的函数调用。终态上 `ResponsesStream.Finish` 把未闭合的 hosted item 补成 `incomplete`，`MessagesStream` 则因为每个托管块写完即闭而天然没有悬空块——两个方向都绝不伪造一个结果块。
+
+### 6.8 自由格式工具（Responses custom tools）
+
+**custom 工具**是 Responses 独有的一种声明：`{"type":"custom","name":"apply_patch","format":{...}}`，输入是自由文本而不是参数对象。Codex 用它声明 `apply_patch` 等工具，而**其它两种协议都没有自由格式工具**。
+
+**它不丢弃，而是降级。** `relay/protocol/responses.go` 的 `parseResponsesTools` 把它转成一个**只带一个必填字符串参数 `input` 的函数**送上游（`required:["input"]`、`additionalProperties:false`——既然承载形式只剩一个槽，就不该让模型在这之外编造参数）。客户端的描述与它带的语法都保留进这个函数的 description：`format.type=="grammar"` 时按 `syntax` 分别写成 Lark / 正则 / 其它语法的提示。JSON Schema 只能说"是个字符串"，说不出"必须是这个语法"，所以语法只能降级成提示——但丢掉它，模型就不知道该产什么形状。
+
+**回程按名字还原。** 请求侧把哪些名字原本是 custom 记在 `GeneralOpenAIRequest.CustomTools`（`json:"-"`）上，relay 在 `codec.NonStreamResponse` 与 `entry.Render` 之间把它嫁接到 `openai.TextResponse.CustomTools`（与 codec 嫁接 `Hosted` 同一手法），流式则经 `streamFactory` 的参数传给渲染器。渲染时命中该名字的调用**出 `custom_tool_call` 项**：`input` 是裸文本，**不带 `arguments` 键**。解包不出来时原样交回整串 arguments——模型若没按约定形状作答，那也仍是它的回答，给一个空 input 等于把它丢了。
+
+**两种严重级别，不可互换：**
+
+- `custom_tool_as_function`（**warning**，presentation）：降级没有丢东西，工具仍可调用，所以它**不该在 `safe` 下拦住请求**，只有 `strict` 会拒绝。
+- `custom_tool_name_conflict`（**error**）：custom 工具与**另一件**工具重名时被丢弃。目标协议只靠名字区分调用，同名的两件对它来说是同一件，于是会有一件永远调不到——这与"换了承载形式"不同，确实改变了模型能做什么。**函数无论声明在前在后都赢**，所以这个检查放在整个 `tools` 数组读完**之后**，不能放进单趟循环。被丢的名字不进留档集合，于是强制它的 `tool_choice` 自然落回既有分支、降级为 auto 并记 `forced_tool_choice_downgraded`——诚实地表示"我们没送这个工具，就强制不了它"。
+
+**流式不是改名。** custom 的输入是 `{"input":"..."}` 这个 JSON 对象在逐片段拼，而 `{"input":"*** Beg` 这样的片段**没法解包**成客户端要的裸文本。所以逐片段的 `response.function_call_arguments.delta` 对 custom **不发**（参数照旧累积），整个 input 在 item 关闭时**一次性**发出：`response.custom_tool_call_input.delta` + `.done`。`output_index` 的记账不受影响——custom item 照样占一个槽，编号仍稠密。
+
+**逐格落点**（Responses 客户端）：
+
+| 上游 | 请求方向 | 响应方向 |
+| --- | --- | --- |
+| `openai-chat` / `compatible` | custom → 单 `input` 字符串的函数 | 该名字的函数调用 → `custom_tool_call` |
+| `anthropic-messages` | 同上（Anthropic 也没有自由格式工具） | 同上 |
+| `openai-responses` | 直通，声明原样到达上游 | 直通 |
+
+**范围之外**（有意不做，见进度日志）：不实现 tool `namespace`（继续完全忽略该字段）；不修 `relay/adaptor/openai_responses/response.go` 的 `decode()` 对**上游返回**的 `custom_tool_call` 的处理（那是 chat 客户端 ← Responses 上游的方向）。
+
+
 
 ## 7. 阶段 4：流式响应与 Usage 归一化
 
