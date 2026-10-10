@@ -134,7 +134,7 @@ def messages_response(model, hosted=False):
     }
 
 
-def messages_stream():
+def messages_stream(hosted=False):
     """A real Anthropic SSE sequence: message_start (input side + cache read,
     running output count), a thinking block, a text block, then the terminal
     message_delta carrying the cumulative output count, then message_stop."""
@@ -149,6 +149,38 @@ def messages_stream():
             "usage": {"input_tokens": 50, "output_tokens": 1,
                       "cache_read_input_tokens": 40},
         }})
+    if hosted:
+        yield ev("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "srvtoolu_mock",
+                              "name": "web_search", "input": {}}})
+        yield ev("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"query": "smoke"}'}})
+        yield ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        yield ev("content_block_start", {
+            "type": "content_block_start", "index": 1,
+            "content_block": {
+                "type": "web_search_tool_result", "tool_use_id": "srvtoolu_mock",
+                "content": [{"type": "web_search_result", "url": "https://mock.example",
+                             "title": "Mock", "encrypted_content": "enc_mock"}]}})
+        yield ev("content_block_stop", {"type": "content_block_stop", "index": 1})
+        yield ev("content_block_start", {
+            "type": "content_block_start", "index": 2,
+            "content_block": {"type": "text", "text": ""}})
+        yield ev("content_block_delta", {
+            "type": "content_block_delta", "index": 2,
+            "delta": {"type": "text_delta", "text": "o"}})
+        yield ev("content_block_delta", {
+            "type": "content_block_delta", "index": 2,
+            "delta": {"type": "text_delta", "text": "k"}})
+        yield ev("content_block_stop", {"type": "content_block_stop", "index": 2})
+        yield ev("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 12}})
+        yield ev("message_stop", {"type": "message_stop"})
+        return
     yield ev("content_block_start", {
         "type": "content_block_start", "index": 0,
         "content_block": {"type": "thinking", "thinking": ""}})
@@ -478,7 +510,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                for chunk in messages_stream():
+                for chunk in messages_stream(hosted=hosted):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 return

@@ -807,6 +807,61 @@ log_since "$OFF" | grep -q 'code=unsupported_hosted_history' \
   && { echo "PASS: the dropped hosted history is named"; pass=$((pass+1)); } \
   || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
 
+# 16i. hosted tools（上游自己执行的工具）流式桥接（B2）。
+#      跨协议流式桥接发生在 messages 与 responses 之间：
+#      - responses 客户端 ← anthropic-messages 上游（claudeHostedBridge）：
+#        Claude 发回来的 server_tool_use 块在流式下被 bridge 观察并转成 neutral start 事件，
+#        紧随其后的 web_search_tool_result 变成 done 事件，由 ResponsesStream 渲染成
+#        response.output_item.added (web_search_call) 与 response.output_item.done，
+#        随后的文本 delta 与 response.completed 原样到达。
+#      - messages 客户端 ← openai-responses 上游（responsesHostedBridge）：
+#        Responses 上游的 web_search_call 项被 bridge 转换为 neutral hosted 事件，
+#        MessagesStream 依据协议能力记一条面向运维的 unrepresentable 诊断，
+#        文本 delta 与流式事件完整到达。
+
+# 16i-1 /v1/responses 客户端 → anthropic-messages 上游，托管搜索流式往返：
+CODE=$(curl -s -N -o tmp_i_resp_stream.txt -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"claude-mock-sonnet\",\"input\":\"$HS\",\"stream\":true,\"tools\":[{\"type\":\"web_search\"}]}")
+check "hosted responses→anthropic stream 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: responses stream carries web_search_call added and done in sequence"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 600 tmp_i_resp_stream.txt)"; fail=$((fail+1)); }
+import json,sys
+events=[]
+for line in open('tmp_i_resp_stream.txt'):
+    line=line.strip()
+    if line.startswith('data: ') and not line.endswith('[DONE]'):
+        try:
+            events.append(json.loads(line[6:]))
+        except Exception:
+            pass
+types=[e.get('type') for e in events]
+added_search=[e for e in events if e.get('type')=='response.output_item.added' and (e.get('item') or {}).get('type')=='web_search_call']
+done_search=[e for e in events if e.get('type')=='response.output_item.done' and (e.get('item') or {}).get('type')=='web_search_call']
+deltas=[e for e in events if e.get('type')=='response.output_text.delta']
+completed=[e for e in events if e.get('type')=='response.completed']
+ok=(len(added_search)==1 and len(done_search)==1 and len(completed)==1 and len(deltas)>=1
+    and added_search[0]['item'].get('status')=='in_progress'
+    and done_search[0]['item'].get('status')=='completed'
+    and added_search[0]['item'].get('action',{}).get('query')=='smoke'
+    and types.index('response.output_item.added') < types.index('response.output_item.done'))
+sys.exit(0 if ok else 1)
+PY
+
+# 16i-2 /v1/messages 客户端 → openai-responses 上游，托管搜索流式往返：
+OFF=$(wc -c < oneapi.log)
+CODE=$(curl -s -N -o tmp_i_msg_stream.txt -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d "{\"model\":\"gpt-5-mock\",\"max_tokens\":64,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"$HS\"}],\"tools\":[{\"type\":\"web_search_20250305\",\"name\":\"web_search\"}]}")
+check "hosted messages→responses stream 200" 200 "$CODE"
+grep -q '"type":"text_delta"' tmp_i_msg_stream.txt \
+  && grep -q 'event: message_stop' tmp_i_msg_stream.txt \
+  && { echo "PASS: messages stream reaches text delta and message_stop"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(head -c 400 tmp_i_msg_stream.txt)"; fail=$((fail+1)); }
+sleep 1
+log_since "$OFF" | grep -q 'code=web_search_response_unrepresentable' \
+  && { echo "PASS: unrepresentable search in stream is diagnosed"; pass=$((pass+1)); } \
+  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
@@ -815,39 +870,40 @@ log_since "$OFF" | grep -q 'code=unsupported_hosted_history' \
 #     + responses 上游：chat→responses 非流式(1) + 流式(1) + 工具(1)
 #       + messages→responses 非流式(1) + 流式(1) + 工具(1) + 缓存(1) = 18
 #     + 直通 responses 非流式(1) + 流式(1) + 工具流式(1) + 缓存(1) = 22
-#     + 16h 的 8 格（16h-1..6、16h-8、16h-9）= 30；16h-7 在 safe 策略下被具名 400，
-#       codec 层 4xx 不写用量行，所以它是计数中性的。这个精确的 30 就是那条证据：
-#       拒绝的请求若偷偷落了一行，下面这个等号会变成 31。
+#     + 16h 的 8 格（16h-1..6、16h-8、16h-9）+ 16i 的 2 格（16i-1、16i-2）= 32；
+#       16h-7 在 safe 策略下被具名 400，codec 层 4xx 不写用量行，所以它是计数中性的。
+#       这个精确的 32 就是那条证据：拒绝的请求若偷偷落了一行，下面这个等号会变成 33。
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 30 ] && { echo "PASS: usage_records 30 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 32 ] && { echo "PASS: usage_records 32 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 30 ] && { echo "PASS: all 30 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 32 ] && { echo "PASS: all 32 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 #     跨协议格子与 responses 上游上报缓存的那条都计入 reported，所以计数不变——这同时是
 #     "没上报才写 not_reported"的反面证据。16h 有 7 格走不报缓存的上游（chat 的 4 格、
-#     responses 的 2 格 + 那一格流式），15+7=22。
+#     responses 的 2 格 + 那一格流式），加上 16i-2（Responses 上游未带 usecache），
+#     15+7+1=23。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 22 ] && { echo "PASS: 22 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行 8 条：1 条 OpenAI details（3）+ 5 条 Anthropic（各 40）
+[ "$NR" = 23 ] && { echo "PASS: 23 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+# 20. §8.1 上报缓存的行 9 条：1 条 OpenAI details（3）+ 6 条 Anthropic（各 40）
 #     + 2 条 Responses input_tokens_details（各 3：翻译路径 1 条 + 直通 1 条）
-#     16h-6（responses→anthropic）是第 5 条：Anthropic 夹具的每个非流式回答都带
-#     cache_read_input_tokens=40，与它是不是托管往返无关。
+#     16h-6（responses→anthropic 非流式）与 16i-1（responses→anthropic 流式）
+#     分别贡献第 5 条与第 6 条 Anthropic 缓存行（各 40）。
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 8 ] && { echo "PASS: 8 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 209/271（169+40 命中 / 221+50 上报输入）；
-#     coverage = 8/30。分母只由上报缓存的行构成，所以 16h 里唯一上报缓存的 16h-6
-#     同时抬高分子与分母，其余 7 格只进 not_reported_cache_calls。
+[ "$RCC" = 9 ] && { echo "PASS: 9 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 249/321（209+40 命中 / 271+50 上报输入）；
+#     coverage = 9/32。分母只由上报缓存的行构成，16i-1 抬高分子与分母，16i-2 只进
+#     not_reported_cache_calls。
 #     缓存写入仍是 0：没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"。
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-209/271)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-8/30)<1e-9 and d['cache_read_input_tokens']==209
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==22)
+ok=(abs(d['cache_hit_rate']-249/321)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-9/32)<1e-9 and d['cache_read_input_tokens']==249
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==23)
 sys.exit(0 if ok else 1)
 PY
 
