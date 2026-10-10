@@ -13,7 +13,7 @@
 4. 不要删除旧数据库列，除非已经完成数据迁移、灰度观察和明确的清理审批。
 5. 不要将历史 `used_quota` 直接换算为 Token。
 6. 不要把未报告的缓存字段填成 `0`。
-7. 不要为了“兼容”而静默丢弃工具、图片、缓存或流式事件。
+7. 不要为了“兼容”而静默丢弃工具、图片、缓存或流式事件。**唯一记在案的例外**：目标协议无法表达的托管工具（hosted tool）在默认的 `tool_loss_policy: allow` 下丢弃，但每一次丢弃都写一条具名诊断（`logHostedLosses`），`safe`/`strict` 下改为具名 400（`hosted_tool_loss`）；响应阶段与流式阶段在任何策略下都不拒绝。见 §6.7。
 8. 代码注释、错误信息和新增 API 文档优先使用项目已有语言风格；数据字段名使用稳定的英文命名。
 9. 数据库迁移必须先备份并在副本上验证；不允许以“删库重建”代替迁移。
 
@@ -35,6 +35,9 @@
 | 通用 usage | `relay/model/misc.go` | 扩展标准 Usage 和缓存明细 |
 | OpenAI 适配 | `relay/adaptor/openai/main.go` | 解析 Chat/Responses usage 和流式收尾 |
 | Anthropic 适配 | `relay/adaptor/anthropic/model.go`、`main.go` | 解析 Messages、SSE 和缓存字段 |
+| 协议入口 | `relay/protocol/`（`messages.go`、`responses.go`、`stream_*.go`） | 三种客户端协议的解析与渲染；只依赖 `relay/model` + `relay/sse` |
+| 协议路由 | `relay/controller/protocol.go`、`protocol_passthrough.go`、`protocol_codec.go` | 能力检查 → 直通 → codec 三路分支；`protocolStream` 的 `Hosted`/`LossOf` |
+| 托管工具 | `relay/model/hosted.go`（中立类型 + kind 表 + 策略，无 adaptor 依赖）；`relay/controller/hosted_attach.go`、`hosted_bridge.go`（请求挂载、流式桥） | 见 §6.7 |
 | 前端 Dashboard | `web/default/src/pages/Dashboard/index.js` | 新增 Token/缓存指标和趋势图 |
 | 前端基础 | `web/default/src/index.css`、`Header.js` | 全局布局、状态和响应式样式 |
 | 前端业务页 | `OperationSetting.js`、`UsersTable.js`、`TokensTable.js`、`LogsTable.js` | 删除额度/倍率文案，接入新字段 |
@@ -401,14 +404,14 @@ request id
 - 使用稳定的 `response.id` 和 `output` 结构。
 - 流式事件必须有明确事件类型，不能把所有片段拼成一条非标准字符串。
 
-输入可以支持文本、图片、工具调用和工具结果；每个不支持的 input item 类型必须被识别并返回结构化错误。
+输入可以支持文本、图片、工具调用和工具结果；每个不支持的 input item 类型必须被识别并返回结构化错误。托管 input item（`web_search_call`/`mcp_call`）是被识别的一类：它们抽进托管历史随请求回放（§6.7）；`reasoning`/`file_search_call`/`computer_call`/`image_generation_call`/`code_interpreter_call`/`local_shell`/`mcp_list_tools`/`mcp_approval_*` 仍是 skip + debug 记录；其余未识别类型返回结构化错误。
 
 **跨协议时**（Responses 客户端 → 非 Responses 上游，请求须经 `GeneralOpenAIRequest` 中间结构）：
 
-- `store` 默认按 `false` 处理；`store=true` 丢弃并 debug 记录（客户端如 Codex 默认会带，硬拒会打断它），不做服务端响应持久化。
+- `store` 默认按 `false` 处理；`store=true` 忽略并 debug 记录（`relay/protocol/responses.go:103`；客户端如 Codex 默认会带，硬拒会打断它），不做服务端响应持久化。
 - 收到 `previous_response_id` 时返回不支持错误。
 - 收到后台任务参数（`background=true`）时返回不支持错误。
-- `tools` 中的内置（hosted）工具类型当前丢弃并 debug 记录；阶段 B 改为具名拒绝或映射。
+- `tools` 中的内置（hosted）工具类型**不再丢弃**：`web_search*` 抽成托管声明并按目标协议映射（chat 目标折成 `web_search_options`，Anthropic 目标折成 `web_search_20250305`），`mcp` 与其余 `native` 类按渠道策略处置而非无声丢弃。见 §6.7。
 
 **同协议时**（Responses 客户端 → Responses 上游）走直通，以上限制**全部不适用**：原生 body 原样转发，`store`、`previous_response_id`、`include`、`reasoning`、`text.format`、hosted 工具声明与未知字段逐字节到达上游；网关只定点补丁顶层 `model` 与强制 prompt（并入 `instructions`）。
 
@@ -425,13 +428,13 @@ request id
 - system。
 - content 数组。
 - text/image block。
-- tool_use。
-- tool_result。
+- tool_use / tool_result。
+- 托管块 `server_tool_use` + `web_search_tool_result`、`mcp_tool_use` + `mcp_tool_result`（§6.7）。
 - `stop_reason`。
 - `stop_sequence`。
 - usage。
 
-**跨协议时**（Messages 客户端 → 非 Messages 上游）：`thinking`、`cache_control` 与 `server_tool_use`/`web_search_tool_result`/`citations` 在 `GeneralOpenAIRequest` 里没有槽位，会丢失——已知有损，须在文档与冒烟里钉住，不能无声消失。
+**跨协议时**（Messages 客户端 → 非 Messages 上游）：`thinking` 与 `cache_control` 在 `GeneralOpenAIRequest` 里没有槽位，会丢失——已知有损，须在文档与冒烟里钉住，不能无声消失。`server_tool_use`/`web_search_tool_result`/`mcp_tool_use`/`mcp_tool_result` **已不再属于这一类**：它们抽进托管声明与托管历史，按目标协议映射，无法映射的按渠道策略具名处置（§6.7）。
 
 **同协议时**（Messages 客户端 → Messages 上游）走直通：`cache_control`、`thinking`、`anthropic-beta` 请求头、未知 content block 类型全部原样往返。
 
@@ -446,7 +449,9 @@ anthropic-messages
 compatible
 ```
 
-这组字符串一旦由管理员保存进 `channels.config.upstream_protocol`，就成为事实上的公开接口：钉成 `relay/upstream` 里的常量，保存时白名单校验，拼错必须报错。**不能静默退回 `openai-chat`**——那会把渠道悄悄改道到翻译路径上，丢掉 hosted tools，而失败是静默的，正是这个声明要防的事。该字段落在既有的 `channels.config` JSON blob 里，无 schema 变更、无迁移条目。
+这组字符串一旦由管理员保存进 `channels.config.upstream_protocol`，就成为事实上的公开接口：钉成 `relay/upstream` 里的常量，保存时白名单校验，拼错必须报错。**不能静默退回 `openai-chat`**——那会把渠道悄悄改道到翻译路径上，从而改变 hosted tools 的去向（见 §6.7），而失败是静默的，正是这个声明要防的事。该字段落在既有的 `channels.config` JSON blob 里，无 schema 变更、无迁移条目。
+
+同一个 blob 里的 `tool_loss_policy`（`allow`/`safe`/`strict`，空即 `allow`）同样在保存时校验：取值不在三者之内则保存失败（`未知的托管工具丢损策略 %q，可选值：allow / safe / strict`）。理由与上一段同构——一个拼错的策略名若静默退回 `allow`，运维会以为自己设了 `strict` 而实际没有。它同样落在既有 blob 内，无 schema 变更、无迁移条目。
 
 客户端协议和上游协议不能混为一谈。一个 Anthropic 客户端请求可以发送给 OpenAI 兼容上游，反之亦然，但必须经过统一中间结构和能力检查。三种客户端协议 × 三种上游协议构成矩阵，每格落点如下：
 
@@ -458,9 +463,55 @@ compatible
 
 - **上游协议解析**：显式配置 > 由 `apitype` 推导 > `openai-chat`。因此既有渠道无需任何配置即保持原行为。
 - **能力检查取代硬编码闸门**：`CanServe(client, up)` 取代 `meta.APIType == apitype.OpenAI`。未翻译的上游家族（Gemini、Baidu、Bedrock 等）解析为 `unsupported`，仍然服务 `/v1/chat/completions`（走它自己的 adaptor），只有两个需要改写请求体的协议入口不可达，返回具名 `upstream_protocol_unsupported`。
-- **同协议即直通**：`client == up` 时不解析、不重渲染，原生字节双向转发。这是保住 `cache_control`、`thinking`、hosted tools 与未知字段的唯一办法，也是"六个跨协议格子必然有损、三个同协议格子必然无损"这一取舍的来源。
+- **同协议即直通**：`client == up` 时不解析、不重渲染，原生字节双向转发。这是保住 `cache_control`、`thinking`、hosted tools 与未知字段的唯一办法，也是"六个跨协议格子必然有损、三个同协议格子必然无损"这一取舍的来源。阶段 9 之后 hosted tools 不再"只有直通才保得住"——跨协议格子现在按 §6.7 映射，或按渠道策略具名处置。直通仍然是无损的那条路，但不再是唯一的路。
 - **跨协议必经 codec**：codec 的输入输出都是既有渲染器已经在吃的形态（`*openai.TextResponse` / `sse.Chunk`），所以 `entry.Parse` / `entry.Render` / `entry.NewStream` 不需要按上游协议长分支。
 - **选渠道时按能力过滤**：上游协议进入渠道选择（内存缓存与库路径都先按客户端协议过滤再算优先级档位）。分组里混用协议时，不能服务该客户端协议的渠道在选中前就被排除，而不是发出去等 400——`Relay` 的重试对 400 不重试（`shouldRetry`），发出去就已经失败了。
+
+### 6.7 托管工具（hosted tools）
+
+**托管工具**是**由上游自己执行**的工具：Anthropic 的 `web_search_20250305` 与 MCP server，Responses 的 `web_search` / `mcp`。客户端只声明它，网关从不执行它；上游把执行结果按自己的块类型（`server_tool_use` + `web_search_tool_result`、`mcp_tool_use` + `mcp_tool_result`）或 output item（`web_search_call`、`mcp_call`）报回来。Chat Completions 对这一切没有词汇表，只有 `web_search_options` 这一个开关——这正是它成为跨协议问题而不是字段映射问题的原因。
+
+**包归属。** 纯类型、kind 表与策略在 `relay/model/hosted.go`，不依赖任何 adaptor：`relay/protocol` 只依赖 `relay/model` + `relay/sse`，若把 kind 表挪进一个依赖 adaptor 的新包，就会为了让 `relay/protocol` 查表而把它间接拖进 adaptor 依赖。需要 adaptor 的两件事分居两处——请求方向的挂载在 `relay/controller/hosted_attach.go`（chat 目标）、`relay/adaptor/openai_responses/request.go`（responses 目标）、`relay/adaptor/anthropic/main.go`（messages 目标）；流式响应方向的桥接在 `relay/controller/hosted_bridge.go`。
+
+**载体。** 中立数据挂在三个既有的归一化类型上，用 `json:"-"` 字段：`GeneralOpenAIRequest.Hosted`、`openai.TextResponse.Hosted`、`sse.Chunk.Hosted`。这样 `Parse` / `RequestBody` / `Render` / `protocolStream` 的签名全部不变，也不会泄漏进上游报文。守卫是 `sse.ParseChunk` 永不填充 `Hosted`、`StreamState.Absorb` 忽略它——托管流事件只能由 codec 写，不可能经 JSON 往返意外产生。
+
+**只有两种 kind 跨协议映射**：`web_search` 与 `mcp`。其余（computer use、bash、text editor、code execution、file search、image generation、web fetch、url context）一律是 `native`，走策略而不做映射。这张窄表是照参考实现的：`code_execution` 在 Responses 里没有 `container_id` 就无法表达，发明一个映射比具名记一次丢损更糟。
+
+**策略。** 按渠道配置，落在既有 `channels.config` JSON blob 的 `tool_loss_policy`（`allow`/`safe`/`strict`，空即 `allow`；零 schema 变更、无迁移条目），保存时白名单校验（见 §6.6）。语义与 new-api 的 `convmeta.Options.ToolLossPolicy` 一致：
+
+- `allow`（默认）：目标表达不了的产物被**丢弃、记一条具名诊断、请求照常成功**，客户端不被告知。
+- `safe`：同一批诊断中凡 severity 为 `error` 者，变成 **400**（`hosted_tool_loss`）。
+- `strict`：任何诊断都变成 400。
+
+**`safe`/`strict` 只作用于请求阶段；响应阶段与流式阶段在任何策略下都不拒绝。** 到那时响应已经在流式写出、上游也真的执行完了搜索，此处拒绝等于把一次已完成的搜索丢掉，而不是保护谁。
+
+这条例外只放宽 §1 的第 7 条，不放宽任何其它约定，且两端都有界：请求阶段的丢损在 `safe`/`strict` 下会变成具名 400；而**每一个阶段**（`allow` 下同样）都为每次丢损写一行面向运维的日志，由 `logHostedLosses` 经 `logger.SysWarnf` 落进 `oneapi.log`：
+
+```text
+channel %d hosted_tool_loss: phase=%s code=%s path=%s %s
+```
+
+`phase` 取 `request` / `response` / `stream`。“客户端不知道”是照参考实现有意为之；“运维不知道”不是。
+
+**诊断码**是 `relay/model/hosted.go` 里的常量，三个阶段共用：`unsupported_hosted_tool`、`unsupported_hosted_history`、`unsupported_search_limit`、`unsupported_domain_filter`、`duplicate_hosted_web_search`、`forced_tool_choice_downgraded`、`web_search_result_continuation_lost`、`web_search_response_unrepresentable`、`web_search_result_omitted`、`mcp_identity_missing`、`mcp_result_unrepresentable`、`mcp_result_missing`。
+
+其中两个容易混为一谈，且语义相反：
+
+- **`web_search_result_continuation_lost` 是请求阶段（历史回放）的丢损。** 第二轮会把上一轮的托管历史回放过去，而两种协议对"一条搜索记录"的定义不一致：Responses 的 `web_search_call` 只有 action、没有结果位，而 Anthropic 拒绝没有配对结果的 `server_tool_use`（于是用 `web_search_tool_result_error(unavailable)` 占位）；反向时 Claude 的 `web_search_tool_result` 的结果在 Responses 的 item 里无处安放。两者都在回放点具名。
+- **`web_search_response_unrepresentable` 是响应阶段的丢损。** 上游的 `web_search_call` 对 Claude 客户端整件无法渲染——Claude 的结果块必须携带只有 Anthropic 能签发的加密搜索结果，而没有结果的调用块又不是 API 接受的形状——所以整件丢弃并具名。参考实现在这里同样是丢弃。
+
+**逐格落点**（请求方向 / 响应方向）：
+
+| 客户端 | 上游 | 请求方向 | 响应方向 |
+| --- | --- | --- | --- |
+| `messages` | `openai-chat` | `web_search_20250305` → `web_search_options` | 无（chat 无法产出托管事件） |
+| `responses` | `openai-chat` | `web_search` → `web_search_options` | 无 |
+| `messages` | `openai-responses` | → `{"type":"web_search"}` | `web_search_call` → **丢弃并具名** `web_search_response_unrepresentable`；`mcp_call` → `mcp_tool_use` + `mcp_tool_result` |
+| `responses` | `anthropic-messages` | → `{"type":"web_search_20250305","name":"web_search"}` | `server_tool_use` + `web_search_tool_result` → `web_search_call`；MCP 同理 |
+
+三个 identity 格子仍走直通，零新代码。**注意上表与阶段 8 计划稿的差异**：计划稿把 `messages` ← `openai-responses` 的响应方向写成 `web_search_call` → `server_tool_use` + `web_search_tool_result`，那是错的。Claude 的结果块必须携带 provider 加密结果，网关重建不出来，所以这条搜索只能整件丢弃并具名——参考实现也是这么做的（`web_search_response_unrepresentable`）。MCP 才是两个方向都能活下来的那一种。
+
+流式：`relay/controller/protocol.go` 的 `protocolStream` 增加 `Hosted(ev)`，`relayProtocolStream` 在分派 `Chunk` 之前先分派 `chunk.Hosted`。两座桥都是"坐在转换器前面的纯观察者"：`claudeHostedBridge` 按 index 闩住 `server_tool_use`/`mcp_tool_use` 的 `content_block_start`、吞掉其 `input_json_delta`、在 `content_block_stop` 时发出事件（此刻 input 才完整），并把结果块按 `tool_use_id` 折回同一件产物；`responsesHostedBridge` 把 `output_item.added`/`done` 与 `web_search_call.*`/`mcp_call.*` 进度事件折成 start/update/done 三段。**被认领的帧不再进转换器**，否则 `input_json_delta` 会漏成一个客户端从未声明的函数调用。终态上 `ResponsesStream.Finish` 把未闭合的 hosted item 补成 `incomplete`，`MessagesStream` 则因为每个托管块写完即闭而天然没有悬空块——两个方向都绝不伪造一个结果块。
 
 ## 7. 阶段 4：流式响应与 Usage 归一化
 
@@ -668,7 +719,8 @@ warnings
 | --- | --- | --- |
 | A：数据与统计 | `model/`、usage service、迁移 | usage_records、recorder、聚合 API |
 | B：额度清理 | `relay/controller/`、`relay/billing/`、用户/令牌 controller | 移除结算和倍率依赖 |
-| C：协议层 | `router/relay.go`、`relay/adaptor/`、协议转换包 | Responses、Anthropic、SSE |
+| C：协议层 | `router/relay.go`、`relay/adaptor/`、`relay/protocol/`、`relay/controller/protocol*.go` | Responses、Anthropic、SSE、跨协议矩阵 |
+| C2：托管工具 | `relay/model/hosted.go`、`relay/controller/hosted_attach.go`、`hosted_bridge.go` | 托管声明/历史的映射与丢损策略（§6.7） |
 | D：前端 | `web/default/src/` | 布局、Dashboard、页面清理 |
 | E：测试与文档 | `docs/`、测试目录 | 协议矩阵、迁移说明、验收报告 |
 

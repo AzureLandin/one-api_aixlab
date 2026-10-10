@@ -146,6 +146,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 2. **新增两个客户端协议入口** `router/relay.go`：`POST /v1/responses`、`POST /v1/messages`，复用既有中间件链（`RelayPanicRecover → TokenAuth → Distribute`）。`relaymode` 新增 `Responses`、`AnthropicMessages` 两个模式常量与 `GetByPath` 前缀映射；`controller/relay.go` `relayHelper` 增加分发分支。
 3. **统一中间结构 + 分层** `relay/protocol/`（纯转换、无 gin、可单测）：
    - `errors.go`：`ProtocolError` 携带参数名/类型/码/状态，落地 §6.4/§6.5 “不支持项必须点名拒绝，不静默降级”。
+     - **（阶段 9 部分作废）** 托管工具是该条约定**唯一**记在案的例外：目标协议表达不了时在默认 `allow` 策略下丢弃并写具名诊断，`safe`/`strict` 下才是具名 400。其余全部照旧。见实施文档 §6.7。
    - `responses.go`：`ParseResponses`（OpenAI Responses → `GeneralOpenAIRequest`）+ `RenderResponses`（`openai.TextResponse` → Responses 信封）。
    - `messages.go`：`ParseMessages`（Anthropic Messages → `GeneralOpenAIRequest`）+ `RenderMessages`（`openai.TextResponse` → Anthropic 信封），含 `finish_reason ↔ stop_reason` 反向映射（现有 anthropic 适配器只有“Claude 上游→OpenAI 客户端”方向）。
    - `util.go`：`json.RawMessage` 防御式读取小工具。
@@ -154,16 +155,21 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ### §6.4 Responses 第一版边界（均返回点名结构化错误）
 - `store`：默认按 false；`store=true` → 拒绝（不做服务端持久化）。
+  - **（后续修正，渠道配置提交 `a2d2281`）** 实际落地改为**忽略 + debug 记录**而非拒绝（`relay/protocol/responses.go:103`）：Codex 等客户端默认会带 `store=true`，硬拒会打断它们，而不做服务端持久化本身无害——响应总是内联返回。
 - `previous_response_id` → 拒绝；`background=true` → 拒绝。
 - `input` 支持裸字符串、message 项（含 text/image content part）、`function_call`、`function_call_output`；`reasoning`/`item_reference`/`computer_call`/未识别项类型 → 点名 `input[i].type` 拒绝。
+  - **（阶段 9 修正）** `reasoning`/`file_search_call`/`computer_call`/`image_generation_call`/`code_interpreter_call`/`local_shell`/`mcp_list_tools`/`mcp_approval_*` 改为 skip + debug 记录（不再 4xx）；`web_search_call`/`mcp_call` 抽进托管历史随请求回放。其余未识别类型仍点名拒绝。
 - `tools` 仅 function（内置 web_search/file_search 等拒绝）；`tool_choice` 支持 auto/none/required 与 function 对象。
+  - **（阶段 9 作废）** 内置工具不再拒绝：`web_search*` 抽成托管声明并按目标协议映射，`mcp` 与其余 `native` 类按渠道策略处置。非 function 的 `tool_choice` 仍降级为 auto，但被强制的 kind 记进 `ForcedChoice` 并写 `forced_tool_choice_downgraded` 诊断。见实施文档 §6.7。
 - 稳定 `response.id`（`resp_` + 上游 chatcmpl 后缀）、`output[]`（message + function_call 项）、`output_text` 由 content 派生；`finish_reason=length` → `status:"incomplete"`+`incomplete_details`。
 - usage 指针语义：`input_tokens_details.cached_tokens`/`output_tokens_details.reasoning_tokens` **仅在上游上报时出现**，绝不伪造 0。
 
 ### §6.5 Messages 覆盖
 - 请求：`system`（string 或 text block 数组）、`messages`（string 或 block 数组）、`max_tokens`（必填正整数）、`stop_sequences`、`temperature/top_p/top_k`、`tools`（input_schema）、`tool_choice`（auto/any→required/tool/none）。
 - content block：`text`、`image`（base64→data URI、url→image_url）、`assistant` 的 `tool_use`（归一为 OpenAI tool_calls，arguments 存 JSON 字符串）、`tool_result`（归一为独立 `role:"tool"` 消息，带 `tool_call_id`）。`document`/未知块 → 点名拒绝；`tool_use` 出现在 user 消息 → 拒绝。
+  - **（阶段 9 部分作废）** `server_tool_use`/`mcp_tool_use` 与 `web_search_tool_result`/`mcp_tool_result` 不再落进“未知块 → 点名拒绝”：它们抽成托管历史随请求回放（`HostedHistoryItem`），无法回放的目标按渠道策略具名处置。`document`、真正未识别的块类型、以及 user 消息里的 `tool_use` 仍然点名拒绝。见实施文档 §6.7。
 - 响应：`id/msg_*`、`type:"message"`、`role:"assistant"`、`content`（text + tool_use 块，input 由 arguments 反解析）、`stop_reason`（stop→end_turn、length→max_tokens、tool_calls→tool_use、空→null）、`usage`（input/output_tokens）。
+  - **（阶段 9 追加）** `content` 还能承载托管块：`mcp_tool_use` + `mcp_tool_result` 双向都渲染；`server_tool_use`/`web_search_tool_result` 只在请求方向（历史回放）成立，响应方向整件丢弃并具名 `web_search_response_unrepresentable`（Claude 的结果块必须携带 provider 加密结果，网关重建不出来）。
 
 ### §6.6 上游协议选择
 - 阶段 3 两个入口仅支持 **OpenAI 兼容上游**（`meta.APIType==apitype.OpenAI`）；其他渠道类型返回明确 `upstream_protocol_unsupported`，不猜测、不静默降级。多上游协议矩阵在阶段 4+ 扩展。
@@ -276,11 +282,11 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## §13 终局验收清单
 
-逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(109/0，阶段 8 口径)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
+逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(142/0，阶段 9 口径)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
 
 - [x] 新请求路径没有额度预扣/扣除/退款/额度不足判断 — 阶段 2（`relay/billing/billing.go` 删除、预扣/退款/不足拒绝全部移除）；冒烟 “relay 200 with zero quota”、“user/token/channel 旧列 untouched”。
 - [x] 新请求路径没有模型/分组倍率计费 — 阶段 2（`billingratio` 仅保留名称枚举用途，不参与计费）。
-- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 22 条 success 行、全部 `usage_source=reported`、`cache_usage_status` 计数 **22 reported / 15 not_reported**（阶段 8 口径；直通与跨协议格子各自走自己的收尾阶梯）。
+- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 32 条 success 行、全部 `usage_source=reported`、`cache_usage_status` 计数 **9 reported / 23 not_reported**（9+23=32；阶段 9 口径；直通与跨协议格子各自走自己的收尾阶梯）。32 = 阶段 8 的 22 + 16h 的 8 格（16h-1..6、16h-8、16h-9）+ 16i 的 2 格（16i-1、16i-2）；16h-7 是 `safe` 策略下的具名 400，codec 层 4xx 不写用量行，因此对计数中性——这个精确的等号就是"被拒绝的请求没有偷偷落一行"的证据。
 - [x] usage 写入按 `request_id` 幂等 — `InsertUsageRecordOnce` + `usage_records.request_id UNIQUE`；迁移集成测试对三种方言断言“同 request_id 二次写入被拒”。阶段 8 起唯一例外：已有 `error` 行可被后到的 `success`/`partial` 覆盖（反之不可），使重试成功的请求不会留下首次尝试的失败为终态；单测覆盖两向与并发。
 - [x] 渠道选择不把请求发给不能服务该客户端协议的渠道 — 阶段 8（决策 ②）：上游协议进入内存缓存与库路径，先按能力过滤候选再算优先级档位；`ErrNoChannelForProtocol` 与 `ErrChannelNotFound` 可区分。`model/channel_select_test.go` 4 例。
 - [x] 用户 Token 汇总可查询 — `/api/usage/{summary,trend,by-user,by-model,by-channel,by-token}` + `/self` 变体；冒烟 `/api/usage/summary` 三指标校验；Dashboard 消费（阶段 6）。
@@ -291,8 +297,8 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 三种协议流式错误不被吞掉 — `relay/sse` 状态机 `UpstreamErrorNotSwallowed`、`MalformedChunkReturnsError`、`PartialOnAbortAndNoDone`；controller 错误分支 `stream.Error` 终局。
 - [x] 工具参数增量不丢失或串台 — `TestState_ToolArgsGroupedByIndex` + `stream_test` 按 index 分组、不拼接。
 - [x] Prompt Caching 字段被正确归一化 — 阶段 5（`NormalizeUsage`：read/write、nil→not_reported、ptr-0→reported、非法→invalid 保原值）。
-- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=169/221`（阶段 8 口径）。
-- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 15 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。同协议直通格子里的 `input_tokens_details.cached_tokens` 与跨协议格子走同一条 `NormalizeUsage`，不存在“直通路径绕过缓存归一化”的旁路。
+- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=249/321`、覆盖率 `9/32`（阶段 9 口径）。
+- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 23 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。同协议直通格子里的 `input_tokens_details.cached_tokens` 与跨协议格子走同一条 `NormalizeUsage`，不存在“直通路径绕过缓存归一化”的旁路。阶段 9 的两格分工正好是这条不变量的双向证据：16i-1 落 Anthropic 上游（其回答总带 `cache_read_input_tokens`），同时抬高命中分子与 reported 分母；16i-2 落 Responses 上游且未带缓存标记，只进 not_reported——同样"走上游并成功"，缓存归类却由上游报了什么决定，与走哪条协议路径无关。阶段 9 的 reported 分母由 7 抬到 9：多出的两格是 16h-6（非流式）与 16i-1（流式），二者都落 Anthropic 上游、各报 40，分子因此 +80、分母 +100。
 - [x] Dashboard 显示命中率和覆盖率 — 阶段 6 三指标卡（命中率/调用命中率/覆盖率）。
 - [x] 前端无余额、充值、倍率和费用文案 — 阶段 6 删除 46 个无引用费用键、改写 5 处残留文案、移除 `renderQuota*`；脚本复测引用键中费用词命中为 0。
 - [x] 数据库迁移可重复执行 / 有幂等保护 — `migration.Migrate` 跳过已应用版本；迁移集成测试连跑 3 次 bookkeeping 恒为 {1,2} 不重复；矩阵重启后 `schema_migrations=1,2`。
@@ -301,7 +307,11 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 迁移中断重试、重复执行、备份恢复均验证 — 集成测试重复 Migrate x3（中断重试等价）；矩阵备份(drop+restore)恢复；重启幂等。
 - [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
 
-**总门禁**：`go build ./...` ✅ · `go vet` ✅ · `gofmt -l`（relay model middleware controller router model/migration）✅ 空 · `go test`（排除存量红 `common/image`）✅ · 端到端冒烟 `pass=109 fail=0` ✅（阶段 8 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+**总门禁**：`go build ./...` ✅ · `gofmt -l $(git ls-files '*.go')` ✅ 空 · `go test $(go list ./... | grep -v common/image)` ✅ · 端到端冒烟 `pass=142 fail=0` ✅（阶段 9 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+
+**`go vet` 的一处存量红（阶段 9 记录，非本阶段引入）**：本机 Go 1.26.8 工具链下 `go vet ./...` 报一条 `common/message/email.go:67:44: address format "%s:%d" does not work with IPv6`（`hostport` 分析器）。该文件最后一次改动是 `ececfe5`（2025-02-02，上游），早于本分支全部提交，且本阶段未触碰 `common/message`；因此这是工具链版本带来的存量发现，而不是阶段 9 的回归。**本次不修**：它属于另一个子系统，按"迁移/协议/UI 改动分开提交"的约定不该折进文档提交，也不该折进任何阶段 9 提交。本阶段改动到的全部包（`./relay/...`、`./model/...`、`./controller/...`）`go vet` 为空。
+
+**修订说明**：上一版此条曾无条件写 `go vet ✅`，与工具链实际输出不符，阶段 9 一并更正。
 
 ---
 
@@ -348,7 +358,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 2026-10-10。分支 `feat/cross-protocol-matrix` 共 12 个提交：4 个前置（`254ddcf`/`6bfdbe2` 工具调用修复、`29f27bf` 冒烟断言、`b587d14` CLAUDE.md）+ 本阶段的 8 个（A1 `0bc836a` … A7 `12a4772`）。
 
 ### 立项缘由
-一次工具调用缺陷修复（`254ddcf`、`6bfdbe2`）验收后，核对参考实现 new-api 时列出四处**有意偏离**，用户要求「全部都按 new-api 的来」。其中两处是独立子系统：① `/v1/responses` 与 `/v1/messages` 只接受 OpenAI 兼容上游（`upstream_protocol_unsupported` 在 new-api 全仓零命中）；② 服务端工具（hosted tools）硬拒，而 new-api 有完整支持。本阶段交付 ①，②（hosted tools）留作阶段 9。
+一次工具调用缺陷修复（`254ddcf`、`6bfdbe2`）验收后，核对参考实现 new-api 时列出四处**有意偏离**，用户要求「全部都按 new-api 的来」。其中两处是独立子系统：① `/v1/responses` 与 `/v1/messages` 只接受 OpenAI 兼容上游（`upstream_protocol_unsupported` 在 new-api 全仓零命中）；② 服务端工具（hosted tools）硬拒，而 new-api 有完整支持。本阶段交付 ①，②（hosted tools）留作阶段 9——**阶段 9 已交付，见下**。
 
 ### 前提修正
 立项时的三个假设被逐条推翻，记在此处以免重蹈：
@@ -364,7 +374,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 | 上游协议 | `openai-chat`（已支持）、`anthropic-messages`（adaptor 有双向转换，但从协议入口够不着）、`openai-responses`（全新） |
 | 客户端协议 | 不变，三种 |
 | 同协议配对 | **直通**：不解析、不重渲染，原生字节转发 |
-| hosted tools | 全部类型（阶段 9） |
+| hosted tools | 全部类型（阶段 9；**已于阶段 9 交付**） |
 | ① 重试与用量记录 | **终态可覆盖 error 行**：同一 `request_id` 已有 error 行时，允许 success/partial 覆盖 |
 | ② 分组混用协议 | **选择渠道时按能力过滤** |
 | ③ `upstream_protocol` 界面 | **先只做后端**，用 API/配置设置；`web/default` 界面后续阶段 |
@@ -377,7 +387,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 | anthropic-messages | chat 路径（adaptor 转换） | codec 翻译 | 直通 |
 | openai-responses | chat 路径（`text_responses.go`） | 直通 | codec 翻译 |
 
-直通格子的取舍是这一阶段的支点：三个同协议配对**零新代码**地带过 `cache_control`、`thinking`、hosted tools 与未知字段；代价是六个跨协议格子必然有损，于是唯一剩下的问题变成「有损是否具名」。
+直通格子的取舍是这一阶段的支点：三个同协议配对**零新代码**地带过 `cache_control`、`thinking`、hosted tools 与未知字段；代价是六个跨协议格子必然有损，于是唯一剩下的问题变成「有损是否具名」。阶段 9 给出了这个问题的答案：hosted tools 的每一处丢损都有具名诊断码，且每次丢弃都写一行面向运维的日志（见「阶段 9」）。`cache_control` 与 `thinking` 仍只在直通格子里无损。
 
 ### 逐提交记录
 
@@ -421,7 +431,99 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 ### 剩余限制（阶段 9 输入）
 
 1. **hosted tools 跨协议**：`messages`/`responses` → `openai-chat` 时 Chat 协议没有 hosted tool 的位置，诚实结局是**具名拒绝**（`hosted_tool_unsupported_by_upstream`）而非现在的 debug 丢弃；`messages` ↔ `responses` 映射重叠子集，其余按名字拒绝。需要 `protocolStream` 增加 hosted 逃生舱（现有 `Chunk`/`Finish`/`Error` 无处安放），以及 `anthropic` 结构体扩 `server_tool_use`/`web_search_tool_result`/`citations`/`thinking`。
+   - **（阶段 9 已交付，含三处修正）** 落地结果与这条设想有出入，记下来免得日后照旧文重做：① 具名拒绝不是唯一结局，也**不是默认结局**——默认 `allow` 是丢弃 + 具名诊断 + 请求成功，具名 400 只在 `safe`/`strict` 下出现；诊断码定为 `unsupported_hosted_tool`（**不是** `hosted_tool_unsupported_by_upstream`）。② `protocolStream` 的 hosted 逃生舱按设想加了（`Hosted(ev)` + `LossOf()`），`anthropic` 结构体也按设想扩了字段。③ `messages`/`responses` 的**响应方向不对等**：`mcp_call` 双向都能活，`web_search_call` 对 Claude 客户端只能整件丢弃并具名 `web_search_response_unrepresentable`——Claude 的结果块必须携带只有 Anthropic 能签发的加密搜索结果，网关重建不出来，参考实现在此处同样是丢弃。
 2. **跨协议配对的流式 hosted 交错**预期要**每个配对一座桥**，而不是一个通用机制。
+   - **（阶段 9 已交付，设想成立）** 两座桥（`claudeHostedBridge`、`responsesHostedBridge`）确实各写各的，且都是"坐在转换器前面的纯观察者”：认领属于托管产物的帧、吞掉它们、产出中立事件，未认领的帧原样交给转换器。事实上只需要两座——三个 identity 格子走直通不经过桥，两个 chat 上游格子根本不会产出托管产物（`web_search_options` 是一个开关，上游用普通 chat 流回答），所以 3×3 里需要桥的只有 messages ↔ responses 这一对方向。
 3. **`upstream_protocol` 与渠道族的相容性检查**应收成一处表。
 4. **预检级拒绝的 usage 行**规则需要与 §「明确限制（阶段 4 收口）」统一（见「已知偏离」）。
 5. **前端 `upstream_protocol` 编辑界面**（决策 ③ 的后半）。
+
+---
+
+## 阶段 9：hosted tools（服务端工具，对齐 new-api）
+
+### 完成时间
+2026-10-10。分支 `feat/cross-protocol-matrix` 上 8 个提交：`a530df0`、`5cf1286`、`a500454`、`337e55a`、`6a6ed3e`、`c5ebd4b`、`7267871` + 本文档提交。
+
+### 立项缘由
+阶段 8 的「剩余限制」第 1、2 条就是本阶段。要解决的原本是两块语义相反的补丁：`relay/protocol/responses.go` **丢弃** hosted 工具声明（注释写明 Codex 默认带 `web_search`，硬拒会让它每个请求都失败），`relay/protocol/messages.go` **硬拒**同样内容（4xx）。阶段 9 让托管声明走真正的链路，并把"哪一格丢、哪一格转"从散落的补丁变成一条**写下来的、可配置的**规则。
+
+### 前提修正
+1. **托管工具不是"多一个字段"，而是第三种协议语义。** 它在 Claude 是"两个块 + 一个 id 关联"（`server_tool_use` 开、`web_search_tool_result` 结果），在 Responses 是"一个 item 走 added/progress/done 三段"。中立形态必须能表达"一件产物分阶段到达"，否则流式无法把 Claude 的两块折成 Responses 的一个 item。→ `HostedStreamEvent{Phase start|update|done}`。
+2. **`GeneralOpenAIRequest` 一个类型就够。** new-api 把 `Set` 与请求并排传，是因为它的注册表按格式切换**请求类型**；这里四个格子都汇流到同一个中间结构，所以中立数据直接挂在它上面（`json:"-"`），`Parse`/`RequestBody`/`Render`/`protocolStream` 签名全部不变。
+3. **`relay/protocol` 不能被拖着依赖 adaptor。** 它今天只依赖 `relay/model` + `relay/sse`。若把 kind 表放进一个依赖 adaptor 的新包，`relay/protocol` 为了查表就会间接依赖 `relay/adaptor/anthropic`。→ 纯类型/表/策略放 `relay/model/hosted.go`，需要 adaptor 的挂载与桥接放 `relay/controller/`。
+
+### 已确定的范围与决策
+
+| 维度 | 结论 |
+| --- | --- |
+| 丢弃策略 | **照 new-api**：默认 `allow` = 丢弃 + 面向运维的具名诊断 + 请求成功，客户端不被告知；按渠道可设 `allow`/`safe`/`strict`。**响应与流式阶段任何策略下都不拒绝** |
+| 拆分 | **两段**：B1 = 中立类型 + 请求侧抽取/挂载 + 非流式响应建模 + 策略；B2 = 流式桥 |
+| 工具广度 | **照 new-api 的窄表**：只有 `web_search` 与 `mcp` 跨协议映射，其余走策略 |
+| chat 上游的 web_search | 在 `GeneralOpenAIRequest` 增加 `web_search_options` 字段并映射过去 |
+| B1 历史范围 | **包含**：客户端回放的托管轮次在 B1 内建模，否则 messages↔responses 只有单轮可用 |
+| `compatible` 上游 | **发** `web_search_options`（它按定义就是 chat 兼容端点，该字段是标准 Chat 字段） |
+
+### 关键设计
+
+**载体**：中立数据挂在三个既有归一化类型上，用 `json:"-"` 字段——`GeneralOpenAIRequest.Hosted`、`openai.TextResponse.Hosted`、`sse.Chunk.Hosted`。守卫：`sse.ParseChunk` 永不填充 `Hosted`、`StreamState.Absorb` 忽略它，所以托管流事件只能由 codec 写，不可能经 JSON 往返意外产生。
+
+**窄表**：`web_search` 与 `mcp` 之外全部是 `native`。这不是省事而是照抄参考实现——new-api 的 `code_execution` 出站直接返回 `""`，理由是 Responses 没有 `container_id` 就无法表达 `code_interpreter_call`；发明一个映射比具名记一次丢损更糟。
+
+**策略**：`ChannelConfig.tool_loss_policy` 落在既有 `channels.config` JSON blob，**零 schema 变更、无迁移条目**（先例：`upstream_protocol`）。保存时白名单校验，因为一个拼错的策略名静默退回 `allow`，等于运维以为自己设了 `strict` 而实际没有。
+
+**约定例外（本阶段唯一放宽的既有约定）**：§1 第 7 条"不要静默丢弃"在托管工具上有一条记在案的例外，两端都有界——请求阶段在 `safe`/`strict` 下变成具名 400（`hosted_tool_loss`），而**每一个阶段**（`allow` 下同样）都为每次丢损写一行 `logger.SysWarnf` 落进 `oneapi.log`：`channel %d hosted_tool_loss: phase=%s code=%s path=%s %s`，`phase` ∈ `request`/`response`/`stream`。"客户端不知道"是照参考实现有意为之；"运维不知道"不是。本阶段只放宽这一条，没有顺带放宽任何其它约定。
+
+### 逐提交记录
+
+| 提交 | 内容 |
+| --- | --- |
+| `a530df0` | **B1a** `relay/model/hosted.go`：中立类型（`HostedSet`/`HostedDefinition`/`HostedHistoryItem`/`HostedOutputItem`/`HostedStreamEvent`）、kind 表、诊断码、策略（`ValidToolLossPolicy`/`RejectLoss`）。无行为变更。 |
+| `5cf1286` | **B1b** 目标侧挂载：`controller/hosted_attach.go` 的 `attachChat`、`adaptor/openai_responses/request.go` 的 `attachHostedTools`、`adaptor/anthropic/main.go` 的 `hostedClaudeTools`；三个 codec 的 `RequestBody` 接线，随即 `logHostedLosses(..., "request", ...)` + `RejectLoss`。 |
+| `a500454` | **B1c** 解析器：`parseMessagesTools`/`parseResponsesTools` 不再丢弃或 4xx，改为抽成托管声明；块/item switch 抽成托管历史；`tool_choice` 里被强制的托管 kind 记进 `ForcedChoice`；非流式渲染 `renderMessagesHosted`/`renderResponsesHosted`。 |
+| `337e55a` | **B1d** 非流式响应建模（两个 codec 的 `NonStreamResponse` 抽取产物写进 `TextResponse.Hosted`）、`ChannelConfig.ToolLossPolicy` + 校验、chat 客户端的 `web_search_options` 两个小口子。 |
+| `6a6ed3e` | **B1e** 单测 5 个文件 + 改靶子 3 处 + 冒烟 16h-1..16h-9。 |
+| `c5ebd4b` | **B2a** 流式桥：`sse.Chunk.Hosted`、`protocolStream.Hosted(ev)`/`LossOf()`、`controller/hosted_bridge.go` 两座桥、`stream_responses.go`/`stream_messages.go` 的 `Hosted` 渲染器。 |
+| `7267871` | **B2b** 单测 2 个文件 + 冒烟 16i-1/16i-2 + `messages_stream` 的托管夹具。 |
+
+迁移提交：**无**（策略在 `channels.config` JSON blob 里）。
+
+### 已知修正
+
+- **计划稿 §4 的响应方向表是错的。** 计划稿写 `messages` 客户端 ← `openai-responses` 上游的响应方向是 `web_search_call` → `server_tool_use` + `web_search_tool_result`。实际不可行，实现为**整件丢弃并具名** `web_search_response_unrepresentable`：Claude 的结果块必须携带只有 Anthropic 能签发的加密搜索结果，网关重建不出来，而没有结果的调用块又不是 API 接受的形状。参考实现在此处同样是丢弃（`relaykit/relayconvert/internal/toolconv/response_artifacts.go:440`，诊断码与理由逐字相同）。**`mcp_call` 才是两个方向都能活下来的那一种。** 冒烟 16h-4 与 16i-2 从两个方向（非流式、流式）把这条钉住。
+- **两个诊断码容易混为一谈，语义相反。** `web_search_result_continuation_lost` 是**请求阶段（历史回放）**的丢损（`adaptor/anthropic/main.go:121`、`adaptor/openai_responses/request.go:341`）：第二轮回放上一轮托管历史时，两种协议对"一条搜索记录"的定义不一致——Responses 的 `web_search_call` 只有 action 没有结果位，而 Anthropic 拒绝没有配对结果的 `server_tool_use`（用 `web_search_tool_result_error(unavailable)` 占位）。`web_search_response_unrepresentable` 是**响应阶段**的丢损。计划稿 §5 把两者写成了一条，已在本阶段更正。
+- **`emitHostedBlock` 的串行化（`c5ebd4b` 内）。** 原渲染器把 text 块一直开着，托管块到达时才开新块，客户端会看到**两个块同时打开**——真实 API 从不这样。改为写入托管块前先关掉开着的 text 块，随后的文本开一个新块，这正是模型自己那一轮的样子（写了什么、搜了一次、又写了什么）。由 B2 的"严格串行"帧序列断言暴露出来。
+- **`hosted_tool_streaming_unsupported` 被删除。** 它是 B1 期间"流式尚未桥接"的临时具名拒绝码。B2 桥接了每一个需要桥的格子，该常量随之删除；冒烟 16h-8 反过来断言它**不许回来**。
+
+### 与参考实现的对应（逐条核对）
+
+| 本项目 | new-api | 核对结果 |
+| --- | --- | --- |
+| `ToolLossAllow`/`Safe`/`Strict` = `allow`/`safe`/`strict`，空即 `allow`，仅请求阶段生效 | `ConversionLossPolicy*` + `convmeta.Options.ToolLossPolicy` | 逐字一致 |
+| 拒绝码 `hosted_tool_loss`，400 | 同 | 一致 |
+| `unsupported_hosted_tool`/`unsupported_search_limit`/`unsupported_domain_filter` | `toolconv/encode.go`、`channel/ali/web_search.go`、`channel/zhipu_4v/web_search.go` | 逐字一致 |
+| `web_search_response_unrepresentable` | `toolconv/response_artifacts.go:440`（同样跳过渲染） | 逐字一致 |
+| 窄表：只有 `web_search` 与 `mcp` 映射 | 同（`code_execution` 出站为空） | 一致 |
+
+参考实现自己的注释把本阶段实现的三态语义说得最清楚，抄录在此作为对齐证据：
+> The zero value uses the allow policy: conversion succeeds and every loss is returned as a diagnostic. safe/strict rejection is request-phase opt-in only; response and stream conversion never reject regardless of this field.
+
+### 用量不变量（本阶段同样适用）
+
+- 托管格子落同一套 reported / estimated / not_reported 三态，**与走哪条协议路径无关**。冒烟的两格正好构成双向证据：16i-1 落 Anthropic 上游（其回答总带 `cache_read_input_tokens`）→ 同时抬高命中分子与 reported 分母；16i-2 落 Responses 上游且无缓存标记 → 只进 not_reported。缓存归类由上游**报了什么**决定，不由路径决定。
+- `safe` 策略下的具名 400 走 codec 层拒绝，不写 usage 行——所以 16h-7 对 §17 的计数是**中性**的，这正是那个精确等号的意义。
+
+### 测试与验收
+
+- **单测**：`relay/model/hosted_test.go`（`RejectLoss` 矩阵、三态策略）；`relay/protocol/{messages,responses}_hosted_test.go`（声明与历史抽取、`ForcedChoice`、未知块仍 4xx、**普通块输出与改动前逐字段一致**）；`relay/adaptor/anthropic/hosted_test.go` 与 `openai_responses/hosted_test.go`（产物提取与合并）；`relay/controller/protocol_codec_hosted_test.go`（三个目标侧挂载结果、`allow` 丢弃带诊断 / `safe` 返回 `hosted_tool_loss`）；`relay/controller/hosted_bridge_test.go`（Claude 闩住/吞帧/发射序列；Responses 三段式与无 id 寻址）；`relay/protocol/stream_hosted_test.go`（索引稠密、到达顺序、终态补 `incomplete`、严格串行帧序列）。
+- **改靶子（改靶不删）**：`responses_test.go` 四个"托管工具被丢弃且不报错"的用例，行为已变成"被抽取进 `Hosted`"，断言搬进 `responses_hosted_test.go`；`openai_responses/request_test.go` 与 `stream_test.go` 的两处改名，因为原被当作"编程错误/unmapped"的托管条目现在有了归属。
+- **冒烟**：`mock_upstream.py` 增加一对正交开关——`wants_hosted`（声明了托管工具吗）与 `runs_hosted`（额外要求请求带 `use-hosted-search`，声明使工具可用，请求才让上游真的去搜）。两者分开，才能让同样声明了 `web_search_20250305` 的直通格子（16c/16g）继续拿到逐字节保真的原信封，而只有真的要求搜索的格子才长出搜索产物。另给 `messages_stream` 补了托管分支（此前没有）。新增 11 格：16h-1..16h-9（B1）与 16i-1/16i-2（B2）。诊断用 `log_since`（按字节偏移截取）断言而非整文件 grep——同一批 code 会从数条路由发出，整文件 grep 会让后面的格子满足前面格子的断言，测试就失去了定位能力。
+- **计数（刻意更新并保持精确相等，非 `>=`）**：§17/§18 `22→32`，§19 `15→23`，§20 `7→9`，§21 `cache_hit_rate 169/221→249/321`、`cache_coverage 7/22→9/32`、`not_reported_cache_calls 15→23`；`cache_write_input_tokens` 仍为 `0`（没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"）。`RESULT pass=109 → pass=142 fail=0`。
+- **命令**：`go build ./...` ✅ · `gofmt -l $(git ls-files '*.go')` 空 ✅ · `go test $(go list ./... | grep -v common/image)` ✅ · `bash scripts/smoke/run_smoke.sh` → `pass=142 fail=0` ✅ · `go vet ./relay/... ./model/... ./controller/...` 空 ✅（全仓 `go vet ./...` 的一处存量红见 §13 说明，非本阶段引入）。`common/image` 的 jpeg 失败仍是 §0.3 既存红线，未折进任何提交。
+
+### 剩余限制（阶段 10 输入）
+
+1. **前端 `tool_loss_policy` 与 `upstream_protocol` 编辑界面**：两者都已在后端完整生效，但 `web/default` 无 UI（决策 ③ 的后半，与阶段 8 第 5 条合并）。
+2. **`native` 类托管工具全部丢弃**：`computer_use`/`bash`/`text_editor`/`code_execution`/`file_search`/`image_generation`/`web_fetch`/`url_context` 目前只走策略、不做任何映射。若日后要支持，`code_execution` 会先撞上"Responses 缺 `container_id`"这堵墙——参考实现也停在这里，重新评估前应先确认那堵墙是否还在。
+3. **`upstream_protocol` 与渠道族的相容性检查**（阶段 8 第 3 条）仍未收成一处表。
+4. **预检级拒绝的 usage 行**规则仍未与 §「明确限制（阶段 4 收口）」统一（阶段 8 第 4 条）。
