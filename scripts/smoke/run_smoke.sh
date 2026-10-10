@@ -756,24 +756,34 @@ log_since "$OFF" | grep -q 'code=unsupported_hosted_tool' \
   && { echo "PASS: the refused request is still logged (refusal never hides the loss)"; pass=$((pass+1)); } \
   || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
 
-# 16h-8 B1 的流式规则：声明了托管工具又要流式，而 messages ↔ responses 的桥在下一提交。
-#      默认策略下声明被丢弃 + 具名，流照常成功——今天能用的 Codex 流式请求不会被打挂。
-#      夹具没有真的执行搜索（请求里没有 use-hosted-search），所以这里断言的是规则本身。
+# 16h-8 流式与托管声明无关：B2 之后 messages ↔ responses 有一对称的流式桥，所以"声明了托管
+#      工具又要流式"不再是需要策略处置的情况——声明照常到达上游，流照常是普通文本流，日志里
+#      没有、也不该有"流式无法承载托管产物"这条诊断（它的常量已经删除，这一格是它不许回来的
+#      回归钉子）。真正的托管流式往返在 16i-*。
 OFF=$(wc -c < oneapi.log)
 CODE=$(curl -s -N -o tmp_h_stream.txt -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
   -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
   -d '{"model":"gpt-5-mock","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}')
-check "hosted unbridged stream still streams" 200 "$CODE"
+check "hosted stream still streams" 200 "$CODE"
 # The fixture streams the answer as two deltas ("o" then "k"), because a real
 # upstream splits text wherever it likes — so the assertion is that the text block
 # streamed at all, not that some particular string arrived in one piece.
 grep -q '"type":"text_delta"' tmp_h_stream.txt \
   && { echo "PASS: the stream is unaffected by the hosted declaration"; pass=$((pass+1)); } \
   || { echo "FAIL: $(head -c 300 tmp_h_stream.txt)"; fail=$((fail+1)); }
+python3 - <<'PY' && { echo "PASS: the streaming declaration reached the Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+tools=b.get('tools') or []
+# The declaration travels on a stream exactly as it does on a one-shot request:
+# it is the request side of the bridge, and the stream asked for nothing different.
+ok=(len(tools)==1 and tools[0].get('type')=='web_search')
+sys.exit(0 if ok else 1)
+PY
 sleep 1
 log_since "$OFF" | grep -q 'code=hosted_tool_streaming_unsupported' \
-  && { echo "PASS: the unbridged stream is named"; pass=$((pass+1)); } \
-  || { echo "FAIL: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); }
+  && { echo "FAIL: a stream is still being told it cannot carry hosted artifacts: $(log_since "$OFF" | tail -3)"; fail=$((fail+1)); } \
+  || { echo "PASS: the stream is never diagnosed as unable to carry hosted artifacts"; pass=$((pass+1)); }
 
 # 16h-9 回放的托管历史 → chat 上游：第二轮的对话里客户端会把上一轮的搜索记录回放回来，chat
 #      没有承载它的位置，整段历史具名后丢弃，而普通轮次不受影响——"普通块的输出与今天完全

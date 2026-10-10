@@ -214,7 +214,6 @@ func (anthropicChatCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenA
 	// As with the Responses codec, the converter owns the hosted fold-in: it is
 	// what knows where a message boundary lands in Anthropic's message list.
 	converted := anthropic.ConvertRequest(*req)
-	noteUnbridgedHostedStream(req)
 	if bizErr := hostedRequestRefusal(m, req); bizErr != nil {
 		return nil, "", bizErr
 	}
@@ -285,6 +284,7 @@ func (anthropicChatCodec) Stream(m *meta.Meta, resp *http.Response) upstreamStre
 		reader:       sse.NewReader(resp.Body),
 		tools:        anthropic.NewStreamState(),
 		mirror:       &messagesMirror{},
+		hosted:       newClaudeHostedBridge(),
 		promptTokens: m.PromptTokens,
 		modelName:    m.ActualModelName,
 	}
@@ -307,6 +307,12 @@ type anthropicChatStream struct {
 	promptTokens int
 	modelName    string
 
+	// hosted turns the upstream's server-tool blocks into neutral hosted events,
+	// and is what keeps them out of the converter below. Nil would mean "no
+	// bridging", which no caller wants today: every user of this stream is a
+	// client protocol that can spell a hosted artifact.
+	hosted *claudeHostedBridge
+
 	// finishReason is the last non-empty finish_reason the conversion produced.
 	finishReason string
 }
@@ -322,6 +328,20 @@ func (s *anthropicChatStream) Next() (sse.Chunk, error) {
 			// A keep-alive or a frame this gateway does not model: nothing to
 			// render, nothing to accumulate.
 			continue
+		}
+		if s.hosted != nil {
+			hostedEv, consumed := s.hosted.Observe(parsed)
+			if consumed {
+				// The frame belongs to a hosted artifact, and a consumed frame must
+				// not reach the converter: a server_tool_use block would surface as
+				// text and, worse, its input_json_delta fragments as a function call
+				// the client never declared. A consumed frame with no event to show
+				// yet (the call's start, its argument fragments) is simply skipped.
+				if hostedEv == nil {
+					continue
+				}
+				return sse.Chunk{Hosted: hostedEv}, nil
+			}
 		}
 		response, _ := anthropic.StreamResponseClaude2OpenAI(s.tools, parsed)
 		if response == nil {
@@ -391,7 +411,6 @@ func (openaiResponsesCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpe
 		// with the field dropped.
 		return nil, "", bizErr
 	}
-	noteUnbridgedHostedStream(req)
 	if bizErr := hostedRequestRefusal(m, req); bizErr != nil {
 		return nil, "", bizErr
 	}
@@ -438,18 +457,52 @@ func (openaiResponsesCodec) NonStreamResponse(m *meta.Meta, resp *http.Response)
 }
 
 func (openaiResponsesCodec) Stream(m *meta.Meta, resp *http.Response) upstreamStream {
-	return &responsesUpstreamStream{newResponsesUpstream(resp.Body, m.ActualModelName, m.PromptTokens)}
+	up := newResponsesUpstream(resp.Body, m.ActualModelName, m.PromptTokens)
+	// The bridge is attached here rather than inside newResponsesUpstream because
+	// the same reader serves the chat entry point, whose stream is a plain chat
+	// stream with no hosted vocabulary to render a hosted artifact into.
+	up.hosted = newResponsesHostedBridge()
+	return &responsesUpstreamStream{responsesUpstream: up}
 }
 
 // responsesUpstreamStream adapts the shared Responses reader to the codec seam.
 // The reader hands back the bytes it already marshalled for the chat sink, so
 // this side only re-reads them in the normalized framing.
-type responsesUpstreamStream struct{ *responsesUpstream }
+type responsesUpstreamStream struct {
+	*responsesUpstream
+	// deferred holds the chunk produced by the same upstream event whose hosted
+	// events are queued ahead of it. The artifact came first in the upstream's own
+	// stream, so it goes first here too, and the chunk that followed it is handed
+	// out on the next call.
+	deferred *sse.Chunk
+	// deferredErr is a terminal read error that arrived while hosted events were
+	// still queued. A hosted-only answer reaches the end of the body having
+	// streamed nothing but its artifacts; replaying the error here is what keeps
+	// those artifacts from being dropped on the way out.
+	deferredErr error
+}
 
 func (s *responsesUpstreamStream) Next() (sse.Chunk, error) {
 	for {
+		if ev, ok := s.popHosted(); ok {
+			return sse.Chunk{Hosted: &ev}, nil
+		}
+		if s.deferred != nil {
+			chunk := *s.deferred
+			s.deferred = nil
+			return chunk, nil
+		}
+		if s.deferredErr != nil {
+			err := s.deferredErr
+			s.deferredErr = nil
+			return sse.Chunk{}, err
+		}
 		_, raw, err := s.responsesUpstream.next()
 		if err != nil {
+			if s.hasHosted() {
+				s.deferredErr = err
+				continue
+			}
 			return sse.Chunk{}, err
 		}
 		chunk, perr := sse.ParseChunk(raw)
@@ -458,6 +511,11 @@ func (s *responsesUpstreamStream) Next() (sse.Chunk, error) {
 			// is a bug in this gateway rather than a bad upstream frame: it is logged
 			// and skipped instead of being reported as a stream break.
 			logger.SysError("failed to re-read converted responses chunk: " + perr.Error())
+			continue
+		}
+		if s.hasHosted() {
+			chunk := chunk
+			s.deferred = &chunk
 			continue
 		}
 		return chunk, nil

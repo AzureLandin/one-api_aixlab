@@ -30,38 +30,52 @@ func HostedOutputOf(resp *Response) *relaymodel.HostedOutput {
 	}
 	out := &relaymodel.HostedOutput{}
 	for _, item := range resp.Output {
-		switch item.Type {
-		case "web_search_call":
-			out.Items = append(out.Items, relaymodel.HostedOutputItem{
-				Kind:   relaymodel.HostedWebSearch,
-				ID:     item.ID,
-				CallID: item.ID,
-				Status: hostedStatus(item.Status),
-				Action: item.Action,
-				// A web_search_call names the search it ran; the results themselves
-				// are reported inline to the model, not as a field of this item, so
-				// there is nothing to carry across in Results — and nothing is
-				// invented to fill it.
-				Results: nil,
-			})
-		case "mcp_call":
-			out.Items = append(out.Items, relaymodel.HostedOutputItem{
-				Kind:        relaymodel.HostedMCP,
-				ID:          item.ID,
-				CallID:      defaultString(item.CallId, item.ID),
-				Name:        item.Name,
-				ServerLabel: item.ServerLabel,
-				Status:      hostedStatus(item.Status),
-				Arguments:   argumentsRaw(item.Arguments),
-				Output:      item.Output,
-				Error:       hostedItemError(item.Error),
-			})
+		if artifact, ok := HostedItemOf(item); ok {
+			out.Items = append(out.Items, artifact)
 		}
 	}
 	if len(out.Items) == 0 {
 		return nil
 	}
 	return out
+}
+
+// HostedItemOf translates one Responses output item into the neutral artifact,
+// or reports that it is not a hosted one.
+//
+// Exported and split out from HostedOutputOf because a stream reads the same item
+// in two phases — `response.output_item.added` and `...done` — and the artifact
+// each phase produces has to be the one a whole body would have produced. Two
+// translations would be two chances for a streamed answer to differ from the same
+// answer replayed.
+func HostedItemOf(item OutputItem) (relaymodel.HostedOutputItem, bool) {
+	switch item.Type {
+	case "web_search_call":
+		// A web_search_call names the search it ran; the results themselves are
+		// reported inline to the model, not as a field of this item, so there is
+		// nothing to carry across in Results — and nothing is invented to fill it.
+		return relaymodel.HostedOutputItem{
+			Kind:    relaymodel.HostedWebSearch,
+			ID:      item.ID,
+			CallID:  item.ID,
+			Status:  hostedStatus(item.Status),
+			Action:  item.Action,
+			Results: nil,
+		}, true
+	case "mcp_call":
+		return relaymodel.HostedOutputItem{
+			Kind:        relaymodel.HostedMCP,
+			ID:          item.ID,
+			CallID:      defaultString(item.CallId, item.ID),
+			Name:        item.Name,
+			ServerLabel: item.ServerLabel,
+			Status:      hostedStatus(item.Status),
+			Arguments:   argumentsRaw(item.Arguments),
+			Output:      item.Output,
+			Error:       hostedItemError(item.Error),
+		}, true
+	}
+	return relaymodel.HostedOutputItem{}, false
 }
 
 // hostedStatus defaults a missing status to completed: the answer arrived, so

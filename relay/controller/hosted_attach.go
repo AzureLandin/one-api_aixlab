@@ -105,20 +105,3 @@ func hostedRequestRefusal(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) *r
 	logHostedLosses(m.ChannelId, "request", req.Hosted.LossOf())
 	return relaymodel.RejectLoss(m.Config.ToolLossPolicy, req.Hosted.LossOf())
 }
-
-// noteUnbridgedHostedStream records that this request declared a hosted tool
-// and asked for a stream, on a cell whose stream bridge does not exist yet.
-//
-// The declaration still travels upstream and the upstream still runs the tool —
-// what cannot come back is the artifact, because the stream is rendered from
-// the normalized chat chunks and nothing yet translates a hosted event into one.
-// Under the default policy that is the reference implementation's behaviour
-// (drop, diagnose, succeed); under safe/strict it is a named refusal. Either
-// way it is not silent, and no stream that works today stops working.
-func noteUnbridgedHostedStream(req *relaymodel.GeneralOpenAIRequest) {
-	if !req.Stream || req.Hosted.Empty() {
-		return
-	}
-	req.Hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagHostedStreamUnsupported, "stream",
-		"流式响应尚未桥接托管工具产物（内置工具的执行结果无法在流中交回客户端）"))
-}

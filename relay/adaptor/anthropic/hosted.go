@@ -33,61 +33,26 @@ func HostedOutputOf(resp *Response) *relaymodel.HostedOutput {
 	}
 	out := &relaymodel.HostedOutput{}
 	index := map[string]int{}
-	// A result block's payload lands in a kind-specific field — a search carries
-	// opaque results, an MCP call a plain string — but the failure is the same
-	// thing for both, so it is recorded by one piece of code. Recording it only
-	// for MCP would leave a failed search saying "failed" with no reason, which
-	// is the same defect as dropping it, one step quieter.
-	applyResult := func(item *relaymodel.HostedOutputItem, kind relaymodel.HostedKind,
-		content json.RawMessage, failed bool, code string) {
-		if failed {
-			item.Status = relaymodel.HostedStatusFailed
-			item.Error = hostedError(code)
-		} else {
-			item.Status = relaymodel.HostedStatusCompleted
-		}
-		if kind == relaymodel.HostedMCP {
-			item.Output = content
-		} else {
-			item.Results = content
-		}
-	}
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "server_tool_use", "mcp_tool_use":
-			item := relaymodel.HostedOutputItem{
-				Kind:        relaymodel.HostedKindFromClaudeBlock(block.Type, block.Name),
-				ID:          block.Id,
-				CallID:      block.Id,
-				Name:        block.Name,
-				ServerLabel: block.ServerName,
-				// A call that no result block answered stays in_progress, which is
-				// what the Responses vocabulary says about a call still running.
-				Status:    relaymodel.HostedStatusInProgress,
-				Arguments: rawOfValue(block.Input),
-			}
-			if item.Kind == relaymodel.HostedWebSearch {
-				item.Action = relaymodel.HostedSearchAction(
-					relaymodel.HostedSearchQueryFromClaudeInput(block.Input))
-			}
+			out.Items = append(out.Items, HostedCallItem(block.Type, block.Id, block.Name,
+				block.ServerName, block.Input))
 			if block.Id != "" {
-				index[block.Id] = len(out.Items)
+				index[block.Id] = len(out.Items) - 1
 			}
-			out.Items = append(out.Items, item)
 		case "web_search_tool_result", "mcp_tool_result":
-			kind := relaymodel.HostedKindFromClaudeBlock(block.Type, "")
-			content := hostedResultValue(kind, block.Content)
-			failed, code := hostedResultFailure(block.Type, block.Content, block.IsError, block.ErrorCode)
 			if pos, ok := index[block.ToolUseId]; ok {
-				applyResult(&out.Items[pos], kind, content, failed, code)
+				ApplyHostedResultBlock(&out.Items[pos], block.Type,
+					block.Content, block.IsError, block.ErrorCode)
 				continue
 			}
 			item := relaymodel.HostedOutputItem{
-				Kind:   kind,
+				Kind:   relaymodel.HostedKindFromClaudeBlock(block.Type, ""),
 				ID:     block.ToolUseId,
 				CallID: block.ToolUseId,
 			}
-			applyResult(&item, kind, content, failed, code)
+			ApplyHostedResultBlock(&item, block.Type, block.Content, block.IsError, block.ErrorCode)
 			if block.ToolUseId != "" {
 				index[block.ToolUseId] = len(out.Items)
 			}
@@ -98,6 +63,64 @@ func HostedOutputOf(resp *Response) *relaymodel.HostedOutput {
 		return nil
 	}
 	return out
+}
+
+// HostedCallItem builds the neutral item for one Anthropic tool-call block.
+//
+// Exported and split out from HostedOutputOf because the streaming bridge reads
+// the same block in two pieces: `content_block_start` gives it the type/id/name,
+// and the `input_json_delta` fragments before `content_block_stop` give it the
+// input. Both readers therefore build the item the same way, from the same
+// fields, rather than one of them assembling a near-copy.
+//
+// A call that no result block answers stays in_progress, which is what the
+// Responses vocabulary says about a call still running.
+func HostedCallItem(blockType, id, name, serverName string, input any) relaymodel.HostedOutputItem {
+	item := relaymodel.HostedOutputItem{
+		Kind:        relaymodel.HostedKindFromClaudeBlock(blockType, name),
+		ID:          id,
+		CallID:      id,
+		Name:        name,
+		ServerLabel: serverName,
+		Status:      relaymodel.HostedStatusInProgress,
+		Arguments:   rawOfValue(input),
+	}
+	if item.Kind == relaymodel.HostedWebSearch {
+		item.Action = relaymodel.HostedSearchAction(
+			relaymodel.HostedSearchQueryFromClaudeInput(input))
+	}
+	return item
+}
+
+// ApplyHostedResultBlock folds one Anthropic result block — a
+// web_search_tool_result or an mcp_tool_result — into a neutral item, so the two
+// readers of an Anthropic body (the non-streaming extractor and the streaming
+// bridge) decide what a result means in exactly one place.
+//
+// A result's payload lands in a kind-specific field — a search carries opaque
+// results, an MCP call a plain string — but the failure is the same thing for
+// both, so it is recorded by one piece of code. Recording it only for MCP would
+// leave a failed search saying "failed" with no reason, which is the same defect
+// as dropping it, one step quieter.
+func ApplyHostedResultBlock(item *relaymodel.HostedOutputItem, blockType string,
+	content any, explicitError *bool, explicitCode string) {
+	if item == nil {
+		return
+	}
+	kind := relaymodel.HostedKindFromClaudeBlock(blockType, "")
+	raw := hostedResultValue(kind, content)
+	failed, code := hostedResultFailure(blockType, content, explicitError, explicitCode)
+	if failed {
+		item.Status = relaymodel.HostedStatusFailed
+		item.Error = hostedError(code)
+	} else {
+		item.Status = relaymodel.HostedStatusCompleted
+	}
+	if kind == relaymodel.HostedMCP {
+		item.Output = raw
+	} else {
+		item.Results = raw
+	}
 }
 
 // hostedResultValue re-encodes a result block's content into the neutral form.

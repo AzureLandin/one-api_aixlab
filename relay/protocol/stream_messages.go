@@ -29,20 +29,31 @@ type MessagesStream struct {
 	toolArgs  map[int]*strings.Builder
 	toolOpen  map[int]bool
 	toolSeen  []int // tool indices in the order the upstream introduced them
+
+	// hosted is the artifact each hosted item id currently stands for, kept so a
+	// later phase can refine it; hostedCall/hostedResult record which of its two
+	// blocks has already been written, so a re-rendered artifact never repeats one.
+	hosted       map[string]relaymodel.HostedOutputItem
+	hostedCall   map[string]bool
+	hostedResult map[string]bool
+	losses       relaymodel.HostedLossLog
 }
 
 // NewMessagesStream writes the message_start event with an empty content array.
 func NewMessagesStream(w *sse.Writer, id, model string, usage *relaymodel.Usage) *MessagesStream {
 	m := &MessagesStream{
-		w:         w,
-		id:        id,
-		model:     model,
-		textBlock: -1,
-		toolBlock: map[int]int{},
-		toolID:    map[int]string{},
-		toolName:  map[int]string{},
-		toolArgs:  map[int]*strings.Builder{},
-		toolOpen:  map[int]bool{},
+		w:            w,
+		id:           id,
+		model:        model,
+		textBlock:    -1,
+		toolBlock:    map[int]int{},
+		toolID:       map[int]string{},
+		toolName:     map[int]string{},
+		toolArgs:     map[int]*strings.Builder{},
+		toolOpen:     map[int]bool{},
+		hosted:       map[string]relaymodel.HostedOutputItem{},
+		hostedCall:   map[string]bool{},
+		hostedResult: map[string]bool{},
 	}
 	inputTokens := 0
 	if usage != nil {
@@ -174,6 +185,95 @@ func (m *MessagesStream) Chunk(ch sse.Chunk) error {
 	}
 	return nil
 }
+
+// emitHostedBlock writes one hosted content block whole: Claude frames a block
+// as start/delta*/stop, and a hosted block's content is known in its entirety
+// when it is announced — a server tool's input arrives at once, a result arrives
+// as a payload — so the block is opened and stopped together instead of being
+// left open across the text that follows.
+//
+// A text block still being written is closed first, because Claude never has two
+// blocks open at once: a client is entitled to assume the blocks arrive in
+// sequence, and a block started before its predecessor stopped would be the first
+// time such a client ever saw otherwise. The text that follows opens a NEW block,
+// which is what the model's own turn looked like — what it wrote before the
+// search, the search, then what it wrote after it.
+//
+// Because every hosted block is closed as it is written, Finish has no dangling
+// hosted block to close — the terminal rule ("never leave an item half-open") is
+// satisfied here by construction rather than by a final sweep.
+func (m *MessagesStream) emitHostedBlock(block map[string]any) error {
+	if m.textBlock >= 0 {
+		if err := m.w.Event("content_block_stop", map[string]any{
+			"type": "content_block_stop", "index": m.textBlock,
+		}); err != nil {
+			return err
+		}
+		m.textBlock = -1
+	}
+	blockIdx := m.nextIndex
+	m.nextIndex++
+	if err := m.w.Event("content_block_start", map[string]any{
+		"type": "content_block_start", "index": blockIdx, "content_block": block,
+	}); err != nil {
+		return err
+	}
+	return m.w.Event("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIdx})
+}
+
+// Hosted renders one hosted-tool artifact transition as Claude content blocks.
+//
+// The artifact is spelled as the two blocks Claude describes a server tool with:
+// the call block, which is written as soon as the artifact is known, and the
+// result block, which is written when the call returns. Text that arrived between
+// them keeps its place, so the block order on the wire is the order the upstream
+// reported — not the tidier call-then-result adjacency a body would have.
+//
+// A kind Claude cannot express is recorded and skipped rather than invented,
+// exactly as in the non-streaming renderer. This is the one place the gateway
+// drops something by design; it is never silent, and it is never a refusal — the
+// response is already streaming and the upstream has already done the work.
+func (m *MessagesStream) Hosted(ev relaymodel.HostedStreamEvent) error {
+	item := ev.Item
+	if item.ID == "" {
+		// Defensive: both stream bridges address an artifact by an id the upstream
+		// gave it, because a later phase has to be matched back to an earlier one.
+		item.ID = m.id + "_hosted_" + itoa(len(m.hosted))
+	}
+	losses := lossSink(&m.losses)
+	prev, seen := m.hosted[item.ID]
+	if seen {
+		item = relaymodel.MergeHostedItem(prev, item)
+		// What the client's protocol cannot express was named when the artifact was
+		// first seen; re-rendering it must not name it once per event.
+		losses = discardLosses{}
+	}
+	// Only read on the first sight, which is the only sight that can record a loss.
+	path := pathOfHosted(len(m.hosted))
+	m.hosted[item.ID] = item
+
+	artifact := messagesHostedArtifactOf(item, path, item.ID, losses)
+	// The call block opens the artifact; a done phase written by a stream that
+	// joined mid-artifact writes it here first, so a result never names a block
+	// the client never saw.
+	if artifact.call != nil && !m.hostedCall[item.ID] {
+		if err := m.emitHostedBlock(artifact.call); err != nil {
+			return err
+		}
+		m.hostedCall[item.ID] = true
+	}
+	if artifact.result != nil && !m.hostedResult[item.ID] {
+		if err := m.emitHostedBlock(artifact.result); err != nil {
+			return err
+		}
+		m.hostedResult[item.ID] = true
+	}
+	return nil
+}
+
+// LossOf reports what Claude could not be told about. The stream phase never
+// rejects under any policy, so this is the only place the loss can surface.
+func (m *MessagesStream) LossOf() []relaymodel.ConversionDiagnostic { return m.losses.LossOf() }
 
 // Finish closes open blocks and writes message_delta + message_stop.
 // finishReason is the OpenAI finish_reason, mapped to an Anthropic stop_reason

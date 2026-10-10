@@ -65,7 +65,29 @@ type responsesUpstream struct {
 	// event (a snapshot flush plus the terminal tail, say) is not truncated by the
 	// next read.
 	pending []openai.ChatCompletionsStreamResponse
+	// hosted, when set, is the streaming hosted-tool bridge. It is nil on the chat
+	// entry point, which renders plain chat chunks and has nowhere to put a hosted
+	// artifact, so the reader behaves there exactly as it did before the bridge
+	// existed.
+	hosted *responsesHostedBridge
+	// hostedQueue holds the neutral events the bridge produced for the upstream
+	// event just read, in arrival order. They are drained before the event's own
+	// chunks, because the artifact is what the upstream reported first.
+	hostedQueue []relaymodel.HostedStreamEvent
 }
+
+// popHosted takes the next queued hosted event, if any.
+func (r *responsesUpstream) popHosted() (relaymodel.HostedStreamEvent, bool) {
+	if len(r.hostedQueue) == 0 {
+		return relaymodel.HostedStreamEvent{}, false
+	}
+	ev := r.hostedQueue[0]
+	r.hostedQueue = r.hostedQueue[1:]
+	return ev, true
+}
+
+// hasHosted reports whether a hosted event is waiting.
+func (r *responsesUpstream) hasHosted() bool { return len(r.hostedQueue) > 0 }
 
 func newResponsesUpstream(body io.Reader, modelName string, promptTokens int) *responsesUpstream {
 	return &responsesUpstream{
@@ -101,6 +123,13 @@ func (r *responsesUpstream) next() (openai.ChatCompletionsStreamResponse, string
 		ev, err := r.reader.Next()
 		if err != nil {
 			return openai.ChatCompletionsStreamResponse{}, "", err
+		}
+		if r.hosted != nil {
+			// Observed, not consumed: this event still converts below, because a
+			// Responses hosted item is an item the converter already knows to skip
+			// with a debug line, and every other item type on the same event is one
+			// it must still convert.
+			r.hostedQueue = append(r.hostedQueue, r.hosted.Observe(ev.Type, []byte(ev.Data))...)
 		}
 		r.pending = r.conv.Convert(ev.Type, []byte(ev.Data))
 	}

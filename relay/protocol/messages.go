@@ -613,6 +613,93 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 	return envelope
 }
 
+// messagesHostedArtifact is what one neutral artifact becomes on the Claude
+// wire: the mcp_tool_use block that opens it, and the mcp_tool_result block that
+// closes it once the call has returned.
+//
+// It is two fields rather than a slice because the two phases of a STREAM are
+// exactly the two blocks, and they are rendered at different moments: the call
+// block is complete as soon as the input is known, the result block only when
+// the call returns. A body, where both are known at once, emits them adjacent.
+//
+// call is nil when Claude cannot express the artifact at all — the loss is
+// already recorded — and result is nil while there is nothing to report yet.
+type messagesHostedArtifact struct {
+	call   map[string]any
+	result map[string]any
+}
+
+// messagesHostedArtifactOf renders one artifact's blocks. fallbackID is the
+// stand-in id used when the upstream sent none: Claude requires an id on the
+// call block and a result that names it, so an id-less artifact is addressed by
+// its position rather than shipped in a shape the API would reject.
+func messagesHostedArtifactOf(it relaymodel.HostedOutputItem, path, fallbackID string,
+	losses lossSink) messagesHostedArtifact {
+
+	if relaymodel.HostedClaudeBlockName(it.Kind) == "" {
+		losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, path,
+			"Anthropic Messages 无法表达托管工具产物 %s", it.Kind))
+		return messagesHostedArtifact{}
+	}
+	if it.Kind == relaymodel.HostedWebSearch {
+		// A web search is the one artifact Claude cannot be handed at all. Its
+		// result block is required to carry provider-encrypted search results,
+		// which only Anthropic can produce, and a call block without one is not
+		// a shape the API accepts. So the whole artifact is dropped and named,
+		// which is what the reference implementation does here too.
+		losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResponseUnrepresentable, path,
+			"上游的 web_search_call 无法转成 Anthropic 的 web_search_tool_result（其 content 必须是 Anthropic 加密签发的搜索结果，网关无法重建），已丢弃该条搜索记录"))
+		return messagesHostedArtifact{}
+	}
+	if it.Name == "" || it.ServerLabel == "" {
+		losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, path,
+			"Anthropic 的 mcp_tool_use 需要 name 与 server_name，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
+		return messagesHostedArtifact{}
+	}
+	id := it.ID
+	if id == "" {
+		id = fallbackID
+	}
+	out := messagesHostedArtifact{call: map[string]any{
+		"type":        "mcp_tool_use",
+		"id":          id,
+		"name":        it.Name,
+		"server_name": it.ServerLabel,
+		"input":       rawObjectOrEmpty(it.Arguments),
+	}}
+	// A call that reported an outcome gets its result block; one still running
+	// has nothing to report yet. An outcome is an output or an error, and the
+	// error is the text a failed call has to show — otherwise the result would
+	// arrive with is_error set and nothing in it.
+	outcome := it.Output
+	if it.Failed() && len(outcome) == 0 && it.Error != nil && it.Error.Message != "" {
+		outcome = relaymodel.HostedJSONString(it.Error.Message)
+	}
+	if len(outcome) == 0 {
+		if it.Status != relaymodel.HostedStatusInProgress {
+			losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultMissing, path,
+				"上游的 mcp_call 状态为 %q 却既无 output 也无 error，没有可交回的调用结果", it.Status))
+		}
+		return out
+	}
+	// Claude spells an MCP result as an array holding one text block; the
+	// neutral form holds the plain string both protocols carry it as on the
+	// way in, so this is where it is wrapped back up.
+	result, ok := relaymodel.HostedMCPResultString(outcome)
+	if !ok {
+		losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, path+".output",
+			"上游给出的 MCP 结果无法降为单个文本块，Anthropic 的 mcp_tool_result 只能承载文本"))
+		return out
+	}
+	out.result = map[string]any{
+		"type":        "mcp_tool_result",
+		"tool_use_id": id,
+		"content":     []map[string]any{{"type": "text", "text": result}},
+		"is_error":    it.Failed(),
+	}
+	return out
+}
+
 // renderMessagesHosted turns the upstream's hosted artifacts into the Claude
 // content blocks that describe them: a call block and its result block, per
 // artifact.
@@ -627,71 +714,13 @@ func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 	}
 	blocks := make([]map[string]any, 0, len(hosted.Items)*2)
 	for i, it := range hosted.Items {
-		name := relaymodel.HostedClaudeBlockName(it.Kind)
-		if name == "" {
-			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, pathOfHosted(i),
-				"Anthropic Messages 无法表达托管工具产物 %s", it.Kind))
-			continue
+		artifact := messagesHostedArtifactOf(it, pathOfHosted(i), "hosted_"+itoa(i), hosted)
+		if artifact.call != nil {
+			blocks = append(blocks, artifact.call)
 		}
-		if it.Kind == relaymodel.HostedWebSearch {
-			// A web search is the one artifact Claude cannot be handed at all. Its
-			// result block is required to carry provider-encrypted search results,
-			// which only Anthropic can produce, and a call block without one is not
-			// a shape the API accepts. So the whole artifact is dropped and named,
-			// which is what the reference implementation does here too.
-			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResponseUnrepresentable, pathOfHosted(i),
-				"上游的 web_search_call 无法转成 Anthropic 的 web_search_tool_result（其 content 必须是 Anthropic 加密签发的搜索结果，网关无法重建），已丢弃该条搜索记录"))
-			continue
+		if artifact.result != nil {
+			blocks = append(blocks, artifact.result)
 		}
-		if it.Name == "" || it.ServerLabel == "" {
-			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, pathOfHosted(i),
-				"Anthropic 的 mcp_tool_use 需要 name 与 server_name，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
-			continue
-		}
-		// Claude requires an id on the call block and the result to name it, so an
-		// artifact that arrived without one gets a position-scoped stand-in rather
-		// than shipping an id-less block the API would reject.
-		id := it.ID
-		if id == "" {
-			id = "hosted_" + itoa(i)
-		}
-		blocks = append(blocks, map[string]any{
-			"type":        "mcp_tool_use",
-			"id":          id,
-			"name":        it.Name,
-			"server_name": it.ServerLabel,
-			"input":       rawObjectOrEmpty(it.Arguments),
-		})
-		// A call that reported an outcome gets its result block; one still running
-		// has nothing to report yet. An outcome is an output or an error, and the
-		// error is the text a failed call has to show — otherwise the result would
-		// arrive with is_error set and nothing in it.
-		outcome := it.Output
-		if it.Failed() && len(outcome) == 0 && it.Error != nil && it.Error.Message != "" {
-			outcome = relaymodel.HostedJSONString(it.Error.Message)
-		}
-		if len(outcome) == 0 {
-			if it.Status != relaymodel.HostedStatusInProgress {
-				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultMissing, pathOfHosted(i),
-					"上游的 mcp_call 状态为 %q 却既无 output 也无 error，没有可交回的调用结果", it.Status))
-			}
-			continue
-		}
-		// Claude spells an MCP result as an array holding one text block; the
-		// neutral form holds the plain string both protocols carry it as on the
-		// way in, so this is where it is wrapped back up.
-		result, ok := relaymodel.HostedMCPResultString(outcome)
-		if !ok {
-			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".output",
-				"上游给出的 MCP 结果无法降为单个文本块，Anthropic 的 mcp_tool_result 只能承载文本"))
-			continue
-		}
-		blocks = append(blocks, map[string]any{
-			"type":        "mcp_tool_result",
-			"tool_use_id": id,
-			"content":     []map[string]any{{"type": "text", "text": result}},
-			"is_error":    it.Failed(),
-		})
 	}
 	return blocks
 }
@@ -701,6 +730,24 @@ func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 func pathOfHosted(i int) string {
 	return "hosted_tools[" + itoa(i) + "]"
 }
+
+// lossSink is the surface the two hosted loss channels share: the non-streaming
+// HostedOutput, which carries the losses of one rendered body, and the streaming
+// HostedLossLog, which carries those of a stream. They are separate types because
+// their lifetimes differ — one is per response, one per stream — but a renderer
+// records a loss the same way into either, so the code that decides what a loss
+// IS can be shared between the two phases.
+type lossSink interface {
+	AddLoss(d relaymodel.ConversionDiagnostic)
+}
+
+// discardLosses swallows diagnostics. It is passed when an artifact is rendered
+// a second time — a stream re-renders an artifact as each phase refines it — so
+// that a loss already recorded when the artifact was first seen is not written
+// to the log once per event.
+type discardLosses struct{}
+
+func (discardLosses) AddLoss(relaymodel.ConversionDiagnostic) {}
 
 // rawObjectOrEmpty renders a hosted input/argument field as the object Claude
 // expects, for the same reason.

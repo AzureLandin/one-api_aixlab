@@ -38,6 +38,18 @@ type ResponsesStream struct {
 	// source for the terminal response.output, which is why a client can read the
 	// finished tool calls off response.completed alone.
 	order []string
+
+	// hostedItem is the rendered form of each hosted artifact, keyed by the item id
+	// it is addressed by, and hostedIndex its position in order. A hosted artifact
+	// IS an output item on this protocol — web_search_call and mcp_call are item
+	// types — so it takes a place in the same numbering as the message and
+	// function_call items. hostedDone marks the ones already closed, so Finish only
+	// closes what the upstream left open.
+	hostedItem  map[string]map[string]any
+	hostedIndex map[string]int
+	hostedDone  map[string]bool
+	hostedSeq   int
+	losses      relaymodel.HostedLossLog
 }
 
 // NewResponsesStream writes response.created and response.in_progress.
@@ -53,6 +65,9 @@ func NewResponsesStream(w *sse.Writer, respID, model string) *ResponsesStream {
 		toolCall:    map[int]string{},
 		toolStarted: map[int]bool{},
 		toolByID:    map[string]int{},
+		hostedItem:  map[string]map[string]any{},
+		hostedIndex: map[string]int{},
+		hostedDone:  map[string]bool{},
 	}
 	base := r.snapshot("in_progress", nil, false)
 	_ = w.Event("response.created", map[string]any{"type": "response.created", "response": base})
@@ -214,6 +229,62 @@ func (r *ResponsesStream) Chunk(ch sse.Chunk) error {
 	return nil
 }
 
+// Hosted renders one hosted-tool artifact transition as a Responses output item.
+//
+// A hosted artifact is an output item in this protocol, so it is announced and
+// closed the same way a function_call is, and it takes its place in the same
+// r.order — which is what makes its output_index dense and its position the order
+// the upstream reported. A later phase of the same artifact (its arguments
+// arriving, its result landing) refines the item rather than adding a second one,
+// so the client sees one item whose id stays the same from added to done.
+//
+// A kind this protocol has no item type for is recorded and skipped rather than
+// invented, and nothing here is ever a refusal: the response is already streaming.
+func (r *ResponsesStream) Hosted(ev relaymodel.HostedStreamEvent) error {
+	item := ev.Item
+	if item.ID == "" {
+		// Defensive: both stream bridges address an artifact by an id the upstream
+		// gave it, because a later phase has to be matched back to an earlier one.
+		item.ID = r.respID + "_hosted_" + itoa(r.hostedSeq)
+		r.hostedSeq++
+	}
+	losses := lossSink(&r.losses)
+	path := pathOfHosted(len(r.hostedItem))
+	if _, seen := r.hostedItem[item.ID]; seen {
+		// What the protocol cannot express was named when the artifact was first
+		// seen; re-rendering it as each phase refines it must not name it again.
+		losses = discardLosses{}
+	}
+	rendered, ok := renderResponsesHostedItem(item, path, losses)
+	if !ok {
+		return nil
+	}
+	r.hostedItem[item.ID] = rendered
+
+	outIdx, announced := r.hostedIndex[item.ID]
+	if !announced {
+		outIdx = r.addItem(item.ID)
+		r.hostedIndex[item.ID] = outIdx
+		return r.w.Event("response.output_item.added", map[string]any{
+			"type": "response.output_item.added", "item_id": item.ID,
+			"output_index": outIdx, "item": rendered,
+		})
+	}
+	if ev.Phase != relaymodel.HostedPhaseDone {
+		return nil
+	}
+	r.hostedDone[item.ID] = true
+	return r.w.Event("response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "item_id": item.ID,
+		"output_index": outIdx, "item": rendered,
+	})
+}
+
+// LossOf reports what the client's protocol could not carry back. The stream
+// phase never rejects under any policy, so this is the only place the loss can
+// surface.
+func (r *ResponsesStream) LossOf() []relaymodel.ConversionDiagnostic { return r.losses.LossOf() }
+
 // emitArgsDelta writes one function_call_arguments.delta. The event names the
 // call by item_id and output_index; the real API sends no call_id here.
 func (r *ResponsesStream) emitArgsDelta(idx int, args string) error {
@@ -298,6 +369,26 @@ func (r *ResponsesStream) Finish(finishReason string, usage *relaymodel.Usage) e
 	}
 	// Emit in output_index order so the closing events match the item numbering.
 	for _, id := range r.order {
+		if item, ok := r.hostedItem[id]; ok {
+			// A hosted artifact the upstream opened and never closed is closed here
+			// as incomplete. It is not fabricated a result it did not have, and it
+			// is not left dangling in the terminal output either: response.completed
+			// repeats every item, and an item still marked in_progress there would
+			// leave the client to guess whether the search ran.
+			if r.hostedDone[id] {
+				continue
+			}
+			if st, _ := item["status"].(string); st == relaymodel.HostedStatusInProgress {
+				item["status"] = relaymodel.HostedStatusIncomplete
+			}
+			if err := r.w.Event("response.output_item.done", map[string]any{
+				"type": "response.output_item.done", "item_id": id,
+				"output_index": r.hostedIndex[id], "item": item,
+			}); err != nil {
+				return err
+			}
+			continue
+		}
 		idx, ok := r.toolByID[id]
 		if !ok {
 			continue
@@ -339,11 +430,21 @@ func (r *ResponsesStream) Error(e relaymodel.Error) error {
 // response.completed. The terminal one is not a skeleton: it repeats every output
 // item in order, because a Responses client reads the finished function calls
 // from response.output rather than accumulating the deltas.
+//
+// A hosted item keeps its OWN status here rather than taking the response's: a
+// search that completed did complete, and an mcp_call that failed did fail, even
+// when the turn they belong to ended some other way. Only an artifact the
+// upstream never closed is still in_progress at this point, and Finish has
+// already rewritten those to incomplete.
 func (r *ResponsesStream) snapshot(status string, usage *relaymodel.Usage, withUsage bool) map[string]any {
 	items := make([]any, 0, len(r.order))
 	for _, id := range r.order {
 		if id == r.itemID {
 			items = append(items, r.textItem(status))
+			continue
+		}
+		if item, ok := r.hostedItem[id]; ok {
+			items = append(items, item)
 			continue
 		}
 		if idx, ok := r.toolByID[id]; ok {

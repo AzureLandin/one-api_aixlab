@@ -220,10 +220,84 @@ func (o *HostedOutput) LossOf() []ConversionDiagnostic {
 	return o.Losses
 }
 
+// HostedLossLog is the streaming counterpart of HostedOutput.Losses: a
+// diagnostic sink for a renderer that consumes hosted stream events one at a
+// time and never builds a whole HostedOutput. It exists as its own type because
+// the two stream renderers are long-lived objects owned by relayProtocolStream,
+// which reads the log once the stream ends; a HostedOutput would have to be
+// fabricated per event for no one's benefit.
+//
+// Like HostedOutput.Losses, nothing recorded here is ever rejected: the stream
+// phase never refuses under any policy, so this is a diagnostic channel only.
+type HostedLossLog struct {
+	Losses []ConversionDiagnostic
+}
+
+// AddLoss records one thing the client's protocol could not carry. Nil-tolerant,
+// so a renderer can call it unconditionally.
+func (l *HostedLossLog) AddLoss(d ConversionDiagnostic) {
+	if l != nil {
+		l.Losses = append(l.Losses, d)
+	}
+}
+
+// LossOf returns the losses recorded so far, tolerating a nil log.
+func (l *HostedLossLog) LossOf() []ConversionDiagnostic {
+	if l == nil {
+		return nil
+	}
+	return l.Losses
+}
+
 // Failed reports whether this artifact records a failure, by either spelling a
 // failure arrives in: an explicit error object, or the failed status.
 func (i HostedOutputItem) Failed() bool {
 	return i.Error != nil || i.Status == HostedStatusFailed
+}
+
+// MergeHostedItem folds a later phase of an artifact into the one already held.
+//
+// A stream refines an artifact rather than replacing it — the arguments arrive
+// after the identity, the status and the result after both — so the later value
+// wins for every field it carries. A field the later event left empty is kept:
+// an update that does not repeat a field is not withdrawing it, and treating
+// absence as withdrawal would delete an id mid-stream that the client has
+// already been handed.
+func MergeHostedItem(prev, next HostedOutputItem) HostedOutputItem {
+	if next.Kind == "" {
+		next.Kind = prev.Kind
+	}
+	if next.ID == "" {
+		next.ID = prev.ID
+	}
+	if next.CallID == "" {
+		next.CallID = prev.CallID
+	}
+	if next.Name == "" {
+		next.Name = prev.Name
+	}
+	if next.ServerLabel == "" {
+		next.ServerLabel = prev.ServerLabel
+	}
+	if next.Status == "" {
+		next.Status = prev.Status
+	}
+	if len(next.Action) == 0 {
+		next.Action = prev.Action
+	}
+	if len(next.Arguments) == 0 {
+		next.Arguments = prev.Arguments
+	}
+	if len(next.Results) == 0 {
+		next.Results = prev.Results
+	}
+	if len(next.Output) == 0 {
+		next.Output = prev.Output
+	}
+	if next.Error == nil {
+		next.Error = prev.Error
+	}
+	return next
 }
 
 // Streaming phases of a hosted artifact.
@@ -568,7 +642,6 @@ const (
 	DiagDuplicateHostedWebSearch = "duplicate_hosted_web_search"
 	DiagForcedChoiceDowngraded   = "forced_tool_choice_downgraded"
 	DiagSearchContinuationLost   = "web_search_result_continuation_lost"
-	DiagHostedStreamUnsupported  = "hosted_tool_streaming_unsupported"
 
 	// Response-phase codes. They never reach a client: the response is already
 	// being written, and the reference implementation's rule is that the

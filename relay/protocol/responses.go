@@ -633,69 +633,91 @@ func renderResponsesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 	}
 	items := make([]map[string]any, 0, len(hosted.Items))
 	for i, it := range hosted.Items {
-		itemType := relaymodel.HostedResponsesItemType(it.Kind)
-		if itemType == "" {
-			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, pathOfHosted(i),
-				"OpenAI Responses 无法表达托管工具产物 %s", it.Kind))
-			continue
+		if item, ok := renderResponsesHostedItem(it, pathOfHosted(i), hosted); ok {
+			items = append(items, item)
 		}
-		item := map[string]any{"type": itemType}
-		if it.ID != "" {
-			item["id"] = it.ID
-		}
-		if it.Status != "" {
-			item["status"] = it.Status
-		}
-		switch it.Kind {
-		case relaymodel.HostedWebSearch:
-			if action := relaymodel.RawToValue(it.Action); action != nil {
-				item["action"] = action
-			}
-			if len(it.Results) > 0 {
-				// A web_search_call has no field for the results themselves: the
-				// protocol reports them to the model inline and cites them as
-				// annotations on the text. Claude's results are provider-encrypted,
-				// so they could not be carried even if there were a field.
-				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResultOmitted, pathOfHosted(i)+".results",
-					"Claude 的 web_search_tool_result 内容无法写进 Responses 的 web_search_call（该协议把搜索结果内联给模型、以 citation 呈现），仅保留 status 与 action"))
-			}
-		case relaymodel.HostedMCP:
-			if it.Name == "" || it.ServerLabel == "" {
-				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, pathOfHosted(i),
-					"Responses 的 mcp_call 需要 name 与 server_label，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
-				continue
-			}
-			item["name"] = it.Name
-			item["server_label"] = it.ServerLabel
-			// `arguments` is a JSON-encoded string on this wire, not an object.
-			args, ok := relaymodel.HostedMCPArgumentsString(it.Arguments)
-			if !ok {
-				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".arguments",
-					"Responses 的 mcp_call.arguments 只能是 JSON 字符串，上游给出的入参不是对象"))
-				continue
-			}
-			item["arguments"] = args
-			if it.Failed() {
-				// A failed call reports the error INSTEAD of an output, which is
-				// how the protocol distinguishes "the call returned this" from
-				// "the call did not return". The item is still emitted — the call
-				// really happened, and dropping it would hide the attempt.
-				if errObj := mcpErrorObject(it.Error); len(errObj) > 0 {
-					item["error"] = errObj
-				}
-			} else {
-				out, ok := relaymodel.HostedMCPResultString(it.Output)
-				if !ok {
-					hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".output",
-						"Responses 的 mcp_call.output 只能是字符串，上游给出的结果无法降为该形式"))
-					continue
-				}
-				item["output"] = out
-			}
-		}
-		items = append(items, item)
 	}
 	return items
+}
+
+// renderResponsesHostedItem renders one artifact as its Responses output item.
+// ok is false when the protocol has no item type for the kind, which the caller
+// reports as a loss rather than an invented shape.
+//
+// It is split out from the loop above because a stream renders the same artifact
+// once per phase, and the item it puts on the wire must be the same shape
+// whether it was built from a whole body or refined event by event.
+func renderResponsesHostedItem(it relaymodel.HostedOutputItem, path string,
+	losses lossSink) (map[string]any, bool) {
+
+	itemType := relaymodel.HostedResponsesItemType(it.Kind)
+	if itemType == "" {
+		losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, path,
+			"OpenAI Responses 无法表达托管工具产物 %s", it.Kind))
+		return nil, false
+	}
+	item := map[string]any{"type": itemType}
+	if it.ID != "" {
+		item["id"] = it.ID
+	}
+	if it.Status != "" {
+		item["status"] = it.Status
+	}
+	switch it.Kind {
+	case relaymodel.HostedWebSearch:
+		if action := relaymodel.RawToValue(it.Action); action != nil {
+			item["action"] = action
+		}
+		if len(it.Results) > 0 {
+			// A web_search_call has no field for the results themselves: the
+			// protocol reports them to the model inline and cites them as
+			// annotations on the text. Claude's results are provider-encrypted,
+			// so they could not be carried even if there were a field.
+			losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResultOmitted, path+".results",
+				"Claude 的 web_search_tool_result 内容无法写进 Responses 的 web_search_call（该协议把搜索结果内联给模型、以 citation 呈现），仅保留 status 与 action"))
+		}
+	case relaymodel.HostedMCP:
+		if it.Name == "" || it.ServerLabel == "" {
+			losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, path,
+				"Responses 的 mcp_call 需要 name 与 server_label，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
+			return nil, false
+		}
+		item["name"] = it.Name
+		item["server_label"] = it.ServerLabel
+		// `arguments` is a JSON-encoded string on this wire, not an object.
+		args, ok := relaymodel.HostedMCPArgumentsString(it.Arguments)
+		if !ok {
+			losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, path+".arguments",
+				"Responses 的 mcp_call.arguments 只能是 JSON 字符串，上游给出的入参不是对象"))
+			return nil, false
+		}
+		item["arguments"] = args
+		switch {
+		case it.Failed():
+			// A failed call reports the error INSTEAD of an output, which is
+			// how the protocol distinguishes "the call returned this" from
+			// "the call did not return". The item is still emitted — the call
+			// really happened, and dropping it would hide the attempt.
+			if errObj := mcpErrorObject(it.Error); len(errObj) > 0 {
+				item["error"] = errObj
+			}
+		case it.Status == relaymodel.HostedStatusInProgress && len(it.Output) == 0:
+			// A call the upstream has not finished has no outcome to report. The
+			// protocol's own in_progress mcp_call is identity plus arguments with
+			// no output at all, and that is the state a streamed call sits in
+			// between being announced and returning. Writing output:"" here would
+			// claim the call returned the empty string.
+		default:
+			out, ok := relaymodel.HostedMCPResultString(it.Output)
+			if !ok {
+				losses.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, path+".output",
+					"Responses 的 mcp_call.output 只能是字符串，上游给出的结果无法降为该形式"))
+				return nil, false
+			}
+			item["output"] = out
+		}
+	}
+	return item, true
 }
 
 // mcpErrorObject renders a failed MCP call's error in the Responses shape

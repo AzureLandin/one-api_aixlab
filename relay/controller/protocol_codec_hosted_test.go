@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"io"
+	"reflect"
 	"testing"
 
 	"github.com/songquanpeng/one-api/model"
@@ -251,11 +252,13 @@ func TestOpenAIResponsesCodecDoesNotDuplicateTheSearchTool(t *testing.T) {
 	}
 }
 
-// B1 has no stream bridge for the messages<->responses cells, so a streaming
-// request that declared a hosted tool carries a named diagnostic — but under the
-// default policy it still streams. This is what keeps a Codex request that works
-// today working.
-func TestHostedStreamIsDiagnosedNotRefusedUnderAllow(t *testing.T) {
+// A streaming request takes the SAME request-phase decision as a non-streaming
+// one: the hosted artifact crosses the wire in the response either way, so
+// asking for a stream adds no loss of its own and is neither refused nor
+// diagnosed for being a stream. This is what keeps a Codex request that streams
+// working, and it is why the request attachment and the stream bridge can land in
+// different commits without a policy change in between.
+func TestHostedStreamTakesTheSameRequestPathAsNonStream(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		codec upstreamCodec
@@ -265,53 +268,79 @@ func TestHostedStreamIsDiagnosedNotRefusedUnderAllow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := hostedMeta("")
-			req := hostedRequest(webSearchSet())
-			req.Stream = true
-			if _, _, bizErr := tc.codec.RequestBody(m, req); bizErr != nil {
+			stream := hostedRequest(webSearchSet())
+			stream.Stream = true
+			if _, _, bizErr := tc.codec.RequestBody(m, stream); bizErr != nil {
 				t.Fatalf("allow must not refuse a stream: %v", bizErr)
 			}
-			found := false
-			for _, d := range req.Hosted.LossOf() {
-				if d.Code == relaymodel.DiagHostedStreamUnsupported {
-					found = true
-				}
+			plain := hostedRequest(webSearchSet())
+			if _, _, bizErr := tc.codec.RequestBody(m, plain); bizErr != nil {
+				t.Fatalf("RequestBody: %v", bizErr)
 			}
-			if !found {
-				t.Fatalf("the unbridged stream must be named: %+v", req.Hosted.LossOf())
+			got, want := lossCodes(stream.Hosted.LossOf()), lossCodes(plain.Hosted.LossOf())
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("stream losses %v, non-stream losses %v: the stream must not add a loss of its own", got, want)
 			}
 		})
 	}
 }
 
-// Under safe the same stream is refused by name.
+// Under safe the request is refused by name — for a loss the ATTACHMENT
+// recorded, never for the stream. The refusal names the same tool the
+// non-streaming request would have lost, because the two paths are the same
+// decision.
 func TestHostedStreamIsRefusedUnderSafe(t *testing.T) {
 	m := hostedMeta("safe")
 	req := hostedRequest(webSearchSet())
 	req.Stream = true
 	_, _, bizErr := openaiResponsesCodec{}.RequestBody(m, req)
 	if bizErr == nil {
-		t.Fatalf("safe must refuse an unbridged hosted stream")
+		t.Fatalf("safe must refuse a hosted tool the target cannot express")
 	}
 	if bizErr.Error.Code != "hosted_tool_loss" {
 		t.Fatalf("error code = %q", bizErr.Error.Code)
 	}
 }
 
-// A non-streaming request must NOT carry the streaming diagnostic: the bridge
-// that does not exist yet is only missing on the stream path.
-func TestHostedNonStreamIsNotDiagnosedAsUnbridged(t *testing.T) {
-	m := hostedMeta("")
-	req := hostedRequest(webSearchSet())
+// The two diagnostic families are disjoint, and the request phase must only ever
+// record its own. A response-phase code on a 400 body would tell the client about
+// something that has not happened yet — no answer exists at request time — and
+// one on the log line would send an operator looking in the wrong direction.
+func TestHostedRequestPhaseNeverRecordsAResponsePhaseCode(t *testing.T) {
+	responsePhase := map[string]bool{
+		relaymodel.DiagWebSearchResponseUnrepresentable: true,
+		relaymodel.DiagWebSearchResultOmitted:           true,
+		relaymodel.DiagMCPIdentityMissing:               true,
+		relaymodel.DiagMCPResultUnrepresentable:         true,
+		relaymodel.DiagMCPResultMissing:                 true,
+	}
 	for _, tc := range []upstreamCodec{openaiResponsesCodec{}, anthropicChatCodec{}} {
+		m := hostedMeta("")
+		req := hostedRequest(webSearchSet())
 		if _, _, bizErr := tc.RequestBody(m, req); bizErr != nil {
 			t.Fatalf("RequestBody: %v", bizErr)
 		}
-	}
-	for _, d := range req.Hosted.LossOf() {
-		if d.Code == relaymodel.DiagHostedStreamUnsupported {
-			t.Fatalf("a non-streaming request must not be told its stream is unbridged: %+v", req.Hosted.LossOf())
+		losses := req.Hosted.LossOf()
+		if len(losses) == 0 {
+			// Otherwise this test asserts nothing: webSearchSet carries the two
+			// knobs both targets have to drop.
+			t.Fatalf("the fixture must produce at least one request-phase loss")
+		}
+		for _, d := range losses {
+			if responsePhase[d.Code] {
+				t.Fatalf("request phase recorded the response-phase code %q: %+v", d.Code, losses)
+			}
 		}
 	}
+}
+
+// lossCodes lists the diagnostic codes in order, for comparing two loss sets.
+func lossCodes(diags []relaymodel.ConversionDiagnostic) []string {
+	codes := make([]string, 0, len(diags))
+	for _, d := range diags {
+		codes = append(codes, d.Code)
+	}
+	return codes
 }
 
 // assertLossCodes requires exactly these codes, in this order.

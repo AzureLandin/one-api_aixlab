@@ -84,6 +84,14 @@ type Chunk struct {
 	} `json:"choices"`
 	Usage *relaymodel.Usage `json:"usage"`
 	Error *relaymodel.Error `json:"error"`
+
+	// Hosted carries one hosted-tool artifact transition — a web search or an MCP
+	// call the UPSTREAM ran itself — for client protocols that have a vocabulary
+	// for it. It is not part of any wire protocol: it is `json:"-"` so a chunk
+	// that came off the wire can never carry one, and the codecs are the only
+	// writers. A chunk with Hosted set carries no text or tool-call delta, and a
+	// renderer that ignores the field simply never learns the artifact happened.
+	Hosted *relaymodel.HostedStreamEvent `json:"-"`
 }
 
 // ParseChunk decodes one SSE data payload into a Chunk. Renderers use it to
@@ -143,6 +151,8 @@ func (c Chunk) FinishReasonOf() string {
 // Absorb feeds one SSE event payload into the state. A [DONE] marker flips the
 // terminal flag; an empty-but-parseable chunk is a no-op. Malformed JSON is
 // reported so callers can pass the raw line through without corrupting state.
+// Chunk.Hosted is deliberately not absorbed: a hosted artifact is not part of
+// the text/tool-call state this accumulator summarizes.
 func (s *StreamState) Absorb(ev Event) error {
 	if ev.IsDone() {
 		s.sawDone = true

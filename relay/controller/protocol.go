@@ -28,8 +28,19 @@ type streamFactory func(w *sse.Writer, id, model string, promptUsage *relaymodel
 // stream renderers.
 type protocolStream interface {
 	Chunk(ch sse.Chunk) error
+	// Hosted renders one hosted-tool artifact transition — a web search or an
+	// MCP call the upstream ran itself. It is separate from Chunk because it is
+	// not a text/tool-call delta: a client protocol with a hosted vocabulary
+	// spells it as its own block or item type, and one without simply has
+	// nowhere to put it (see LossOf).
+	Hosted(ev relaymodel.HostedStreamEvent) error
 	Finish(finishReason string, usage *relaymodel.Usage) error
 	Error(e relaymodel.Error) error
+	// LossOf reports what the client's protocol could not carry back over the
+	// whole stream. Like the non-streaming renderer's HostedOutput.Losses it is
+	// a diagnostic channel only: the response phase never rejects under any
+	// loss policy, and the relay logs these once the stream has ended.
+	LossOf() []relaymodel.ConversionDiagnostic
 }
 
 // protocolEntry describes one client-protocol HTTP entry point: how to parse
@@ -230,6 +241,17 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 			aborted = true
 			break
 		}
+		// A hosted artifact is not a chat.completion delta: it carries no text and
+		// no tool call, and only a client protocol with a hosted vocabulary can
+		// spell it. Routing it through Chunk would feed an empty delta into the
+		// text/tool accumulators of every renderer.
+		if chunk.Hosted != nil {
+			if werr := stream.Hosted(*chunk.Hosted); werr != nil {
+				aborted = true
+				break
+			}
+			continue
+		}
 		if werr := stream.Chunk(chunk); werr != nil {
 			// write failure -> client gone
 			aborted = true
@@ -250,6 +272,13 @@ func relayProtocolStream(c *gin.Context, ctx context.Context, m *meta.Meta, entr
 	default:
 		_ = stream.Finish(outcome.FinishReason, outcome.Usage)
 	}
+
+	// What the client's protocol could not spell is logged once, here — after the
+	// terminal frame, since finalizing can itself close an artifact the stream
+	// never finished. Same rule as the non-streaming path: the stream is already
+	// being written, so a loss can never become a refusal, and the log is the
+	// only place an operator learns it happened.
+	logHostedLosses(m.ChannelId, "stream", stream.LossOf())
 
 	_ = resp.Body.Close()
 	recordUsage(ctx, m, normalized.Model, outcome.Usage, outcome.Status)
