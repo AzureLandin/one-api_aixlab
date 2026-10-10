@@ -181,6 +181,12 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	}
 
 	envelope := entry.Render(textResponse, normalized.Model)
+	// Rendering records what the client's protocol could not carry back. Unlike
+	// the request phase these never become a refusal — the upstream has already
+	// answered, and failing now would throw away a reply the client asked for —
+	// so a log line is the only place the loss can surface, and it is written
+	// before the envelope goes out so the two are ordered in the log.
+	logHostedLosses(meta.ChannelId, "response", textResponse.Hosted.LossOf())
 	renderProtocolJSON(c, envelope)
 
 	go recordConsumeLog(ctx, usage, meta, normalized.Model, systemPromptReset)

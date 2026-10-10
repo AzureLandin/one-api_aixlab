@@ -1,5 +1,7 @@
 package anthropic
 
+import "encoding/json"
+
 // https://docs.anthropic.com/claude/reference/messages_post
 
 type Metadata struct {
@@ -27,11 +29,19 @@ type Content struct {
 	// every non-hosted block is unchanged.
 	Content   any    `json:"content,omitempty"`
 	ToolUseId string `json:"tool_use_id,omitempty"`
-	// The fields below belong to the hosted MCP blocks (mcp_tool_use carries
-	// the server it dials, mcp_tool_result carries the failure flag). They are
-	// empty on every function tool block, so those keep their wire shape.
-	ServerName string `json:"server_name,omitempty"`
-	IsError    *bool  `json:"is_error,omitempty"`
+	// The fields below belong to the hosted blocks. ServerName is the server an
+	// mcp_tool_use dials, IsError the failure flag on a hosted result, and
+	// Caller what invoked a server-side tool (a nested MCP call carries
+	// {"type":"tool","tool_id":…}). They are empty on every function tool
+	// block, so those keep their wire shape byte for byte.
+	ServerName string          `json:"server_name,omitempty"`
+	IsError    *bool           `json:"is_error,omitempty"`
+	Caller     json.RawMessage `json:"caller,omitempty"`
+	// ErrorCode is a compatibility extension, not an Anthropic field: Claude
+	// puts a provider error code inside the nested result content
+	// (web_search_tool_result_error.error_code). It is modelled so a code that
+	// arrived that way has somewhere to be reported from.
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // ToolChoice is the Anthropic tool_choice object. DisableParallelToolUse is

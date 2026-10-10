@@ -72,9 +72,13 @@ type HostedDefinition struct {
 // protocol-specific ones (Claude's max_uses and domain filters) are read too,
 // so that dropping them can be diagnosed rather than silently ignored.
 type HostedSearchOptions struct {
-	MaxUses           *int
-	AllowedDomains    []string
-	BlockedDomains    []string
+	MaxUses        *int
+	AllowedDomains []string
+	BlockedDomains []string
+	// UserLocation is held in the neutral FLAT spelling
+	// ({"type":"approximate", city, region, country, timezone}) whichever
+	// protocol it arrived on; HostedApproximateLocation re-wraps it for the one
+	// target that nests.
 	UserLocation      json.RawMessage
 	SearchContextSize string
 }
@@ -186,6 +190,40 @@ type HostedOutputItem struct {
 // HostedOutput is the non-streaming form: the artifacts of one response.
 type HostedOutput struct {
 	Items []HostedOutputItem
+
+	// Losses accumulates what the RENDERER could not put back on the wire, for
+	// the relay to log once it has rendered. It mirrors HostedSet.Losses and
+	// exists for the same reason — a renderer is a pure function whose signature
+	// carries the response, and a second return value would churn every caller
+	// for a side channel only the relay reads.
+	//
+	// It is an output of rendering, not of extraction: extraction never drops
+	// anything, and the losses here are what the TARGET protocol could not
+	// express. Nothing recorded here is ever rejected — the response phase
+	// succeeds under every policy — so this is a diagnostic channel only.
+	Losses []ConversionDiagnostic
+}
+
+// AddLoss records one thing rendering could not carry. A nil output is a no-op,
+// so a renderer can call it unconditionally.
+func (o *HostedOutput) AddLoss(d ConversionDiagnostic) {
+	if o != nil {
+		o.Losses = append(o.Losses, d)
+	}
+}
+
+// LossOf returns the losses recorded so far, tolerating a nil output.
+func (o *HostedOutput) LossOf() []ConversionDiagnostic {
+	if o == nil {
+		return nil
+	}
+	return o.Losses
+}
+
+// Failed reports whether this artifact records a failure, by either spelling a
+// failure arrives in: an explicit error object, or the failed status.
+func (i HostedOutputItem) Failed() bool {
+	return i.Error != nil || i.Status == HostedStatusFailed
 }
 
 // Streaming phases of a hosted artifact.
@@ -311,6 +349,201 @@ func HostedClaudeDeclarationType(k HostedKind) string {
 	}
 }
 
+// HostedSearchAction builds the neutral search action ({"type":"search",
+// "query":…}) that both parsers produce and both renderers read. It is defined
+// once so the two directions cannot drift into two shapes: Claude's
+// server_tool_use input is a strict subset of this, and the Responses action is
+// superset-equal to it.
+func HostedSearchAction(query any) json.RawMessage {
+	action := map[string]any{"type": "search"}
+	if query != nil {
+		action["query"] = query
+	}
+	raw, err := json.Marshal(action)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// HostedSearchQueryFromClaudeInput reads the query out of a Claude
+// server_tool_use `input` object, which spells a search as {"query": …}.
+func HostedSearchQueryFromClaudeInput(input any) any {
+	if m, ok := input.(map[string]any); ok {
+		return m["query"]
+	}
+	return nil
+}
+
+// HostedClaudeSearchInput is the inverse: it narrows the neutral action back to
+// the `input` object a Claude server_tool_use block carries. The extra `type`
+// key of the neutral shape is dropped, because Claude's input is documented as
+// {"query": …} and an unknown key there is not something the upstream ignores.
+func HostedClaudeSearchInput(action json.RawMessage) any {
+	var m map[string]any
+	if len(action) > 0 {
+		if err := json.Unmarshal(action, &m); err != nil {
+			m = nil
+		}
+	}
+	if q, ok := m["query"]; ok {
+		return map[string]any{"query": q}
+	}
+	if v := RawToValue(action); v != nil {
+		return v
+	}
+	return map[string]any{}
+}
+
+// --- the MCP result --------------------------------------------------------
+//
+// Both target protocols spell an MCP result as a STRING, which is why the
+// neutral form holds it that way too: Responses says `output`, Claude says
+// `mcp_tool_result.content`. Claude also accepts the structured form — an array
+// holding one text block — and that is the one shape that has to be folded down
+// before it can be sent on, so the folding lives here rather than in either
+// renderer. Doing it once is what stops the two directions from disagreeing
+// about what an MCP result is.
+
+// HostedMCPResultAsString folds Claude's documented spelling of an MCP result —
+// an array holding one text block — down to the plain JSON string the neutral
+// form holds, and which the Responses `output` field is too.
+//
+// A value that is already a string is returned as it is. So is one that cannot
+// be folded without changing what it says (several blocks, a non-text block, a
+// bare object): the renderer reports that as mcp_result_unrepresentable, which
+// is a decision this normalizer is not in a position to make for it.
+func HostedMCPResultAsString(raw json.RawMessage) json.RawMessage {
+	blocks, ok := RawToValue(raw).([]any)
+	if !ok {
+		return raw
+	}
+	if len(blocks) == 0 {
+		return HostedJSONString("")
+	}
+	if len(blocks) != 1 {
+		return raw
+	}
+	blk, ok := blocks[0].(map[string]any)
+	if !ok {
+		return raw
+	}
+	if t, _ := blk["type"].(string); t != "text" {
+		return raw
+	}
+	text, ok := blk["text"].(string)
+	if !ok {
+		return raw
+	}
+	return HostedJSONString(text)
+}
+
+// HostedMCPResultString renders a neutral MCP result as the string both
+// protocols expect. The second return value is false when the value has no
+// string spelling, which the caller reports as mcp_result_unrepresentable
+// rather than sending a shape the upstream would reject.
+func HostedMCPResultString(raw json.RawMessage) (string, bool) {
+	folded := HostedMCPResultAsString(raw)
+	switch v := RawToValue(folded).(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	default:
+		return "", false
+	}
+}
+
+// HostedJSONString encodes a Go string as the JSON string both protocols carry
+// a hosted result in, so a caller holding plain text does not hand-roll the
+// quoting.
+func HostedJSONString(s string) json.RawMessage {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// HostedMCPArgumentsString renders neutral MCP arguments (an object) as the
+// JSON-encoded string Responses carries in `arguments`. The second return value
+// is false when the neutral value is not an object, which is the only shape
+// both protocols can round-trip.
+func HostedMCPArgumentsString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "{}", true
+	}
+	if _, ok := RawToValue(raw).(map[string]any); !ok {
+		return "", false
+	}
+	return string(raw), true
+}
+
+// --- the user_location knob -------------------------------------------------
+//
+// The two spellings in the wild differ by exactly one level of nesting: Chat
+// Completions wraps the four fields under "approximate", while the Responses
+// tool declaration and Claude's web_search put them at the top level. The
+// neutral form takes the FLAT spelling, so a declaration that travelled from
+// Claude to Responses needs no rewrite and only the chat target has to re-wrap.
+// Normalizing at the parse boundary is what keeps that true: the field means the
+// same thing whichever protocol a request arrived on.
+
+// locationFields reads the city/region/country/timezone of either spelling.
+// It returns nil for a value that is absent or not an object, so a malformed
+// knob degrades to "no location" instead of a fabricated one.
+func locationFields(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	if inner, ok := m["approximate"].(map[string]any); ok {
+		return inner
+	}
+	fields := map[string]any{}
+	for _, key := range []string{"city", "region", "country", "timezone"} {
+		if v, ok := m[key]; ok {
+			fields[key] = v
+		}
+	}
+	return fields
+}
+
+// HostedUserLocation normalizes a user_location into the neutral flat form.
+func HostedUserLocation(raw json.RawMessage) json.RawMessage {
+	fields := locationFields(raw)
+	if fields == nil {
+		return nil
+	}
+	loc := map[string]any{"type": "approximate"}
+	for k, v := range fields {
+		loc[k] = v
+	}
+	out, err := json.Marshal(loc)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// HostedApproximateLocation renders the neutral flat form in the nested shape
+// Chat Completions expects.
+func HostedApproximateLocation(raw json.RawMessage) json.RawMessage {
+	fields := locationFields(raw)
+	if fields == nil {
+		return nil
+	}
+	loc := map[string]any{"type": "approximate", "approximate": fields}
+	out, err := json.Marshal(loc)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // HostedClaudeBlockName is the name a Claude hosted content block carries.
 func HostedClaudeBlockName(k HostedKind) string {
 	switch k {
@@ -336,6 +569,16 @@ const (
 	DiagForcedChoiceDowngraded   = "forced_tool_choice_downgraded"
 	DiagSearchContinuationLost   = "web_search_result_continuation_lost"
 	DiagHostedStreamUnsupported  = "hosted_tool_streaming_unsupported"
+
+	// Response-phase codes. They never reach a client: the response is already
+	// being written, and the reference implementation's rule is that the
+	// response phase does not reject under any policy. They exist so the
+	// operator can see what a cross-protocol response could not carry back.
+	DiagWebSearchResponseUnrepresentable = "web_search_response_unrepresentable"
+	DiagWebSearchResultOmitted           = "web_search_result_omitted"
+	DiagMCPIdentityMissing               = "mcp_identity_missing"
+	DiagMCPResultUnrepresentable         = "mcp_result_unrepresentable"
+	DiagMCPResultMissing                 = "mcp_result_missing"
 )
 
 // Tool loss policies, per channel. Empty means allow.

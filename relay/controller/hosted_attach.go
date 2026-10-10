@@ -2,6 +2,7 @@ package controller
 
 import (
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
@@ -43,7 +44,9 @@ func attachChat(req *relaymodel.GeneralOpenAIRequest) {
 		opts := &relaymodel.WebSearchOptions{}
 		if def.WebSearch != nil {
 			opts.SearchContextSize = def.WebSearch.SearchContextSize
-			opts.UserLocation = def.WebSearch.UserLocation
+			// The neutral form holds the flat spelling; Chat Completions nests the
+			// fields one level deeper, so this is where it is re-wrapped.
+			opts.UserLocation = relaymodel.HostedApproximateLocation(def.WebSearch.UserLocation)
 			if def.WebSearch.MaxUses != nil {
 				set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedSearchLimit, def.Path,
 					"OpenAI Chat Completions 无法表达搜索次数上限 max_uses=%d", *def.WebSearch.MaxUses))
@@ -75,9 +78,47 @@ func attachChat(req *relaymodel.GeneralOpenAIRequest) {
 // can find which route lost what. The token "hosted_tool_loss" is what the
 // smoke test greps for; the code is the same string the request-phase 400
 // carries under a safe/strict policy, so the two are greppable together.
-func logHostedLosses(channelId int, set *relaymodel.HostedSet) {
-	for _, d := range set.LossOf() {
-		logger.SysWarnf("channel %d hosted_tool_loss: code=%s path=%s %s",
-			channelId, d.Code, d.Path, d.Message)
+//
+// The phase is on the line because the two phases differ in what the loss
+// means: a request-phase loss is something the model was never asked to do, a
+// response-phase one is something the model did that the client cannot be told
+// about. They are also logged from different places, so without the tag a
+// cross-protocol call that loses something in each direction would read as one
+// loss.
+func logHostedLosses(channelId int, phase string, diags []relaymodel.ConversionDiagnostic) {
+	for _, d := range diags {
+		logger.SysWarnf("channel %d hosted_tool_loss: phase=%s code=%s path=%s %s",
+			channelId, phase, d.Code, d.Path, d.Message)
 	}
+}
+
+// hostedRequestRefusal is the single exit every upstream codec takes once its
+// converter has folded the hosted set in: it writes the drops to the log, and
+// under the channel's policy turns the same diagnostics into a named refusal.
+//
+// Logging happens before the refusal decision on purpose. Under safe/strict the
+// request fails, but the operator still needs the log line to know which route
+// and which tool caused it — and a refusal that reached the client without ever
+// being logged would be the one case where a loss is invisible from the
+// server's side, which is the whole thing this design exists to prevent.
+func hostedRequestRefusal(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) *relaymodel.ErrorWithStatusCode {
+	logHostedLosses(m.ChannelId, "request", req.Hosted.LossOf())
+	return relaymodel.RejectLoss(m.Config.ToolLossPolicy, req.Hosted.LossOf())
+}
+
+// noteUnbridgedHostedStream records that this request declared a hosted tool
+// and asked for a stream, on a cell whose stream bridge does not exist yet.
+//
+// The declaration still travels upstream and the upstream still runs the tool —
+// what cannot come back is the artifact, because the stream is rendered from
+// the normalized chat chunks and nothing yet translates a hosted event into one.
+// Under the default policy that is the reference implementation's behaviour
+// (drop, diagnose, succeed); under safe/strict it is a named refusal. Either
+// way it is not silent, and no stream that works today stops working.
+func noteUnbridgedHostedStream(req *relaymodel.GeneralOpenAIRequest) {
+	if !req.Stream || req.Hosted.Empty() {
+		return
+	}
+	req.Hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagHostedStreamUnsupported, "stream",
+		"流式响应尚未桥接托管工具产物（内置工具的执行结果无法在流中交回客户端）"))
 }

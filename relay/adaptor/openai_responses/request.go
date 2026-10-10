@@ -78,11 +78,23 @@ type ContentPart struct {
 // ToolDef is a function tool declaration. The Responses protocol flattens what
 // Chat Completions nests under `function`.
 type ToolDef struct {
-	Type        string `json:"type"`
-	Name        string `json:"name"`
+	Type string `json:"type"`
+	// Name is omitempty so a hosted declaration ({"type":"web_search"}) does not
+	// carry an empty one. A function tool always has a name — convertTools
+	// refuses an unnamed one — so this changes nothing for those.
+	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 	Parameters  any    `json:"parameters,omitempty"`
 	Strict      *bool  `json:"strict,omitempty"`
+	// The fields below belong to the hosted web_search declaration.
+	SearchContextSize string          `json:"search_context_size,omitempty"`
+	UserLocation      json.RawMessage `json:"user_location,omitempty"`
+	Filters           *ToolFilters    `json:"filters,omitempty"`
+}
+
+// ToolFilters is the domain filter a Responses web_search declaration accepts.
+type ToolFilters struct {
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
 }
 
 // TextConfig is the Responses equivalent of chat's response_format.
@@ -178,7 +190,7 @@ func ChatToResponsesRequest(req *relaymodel.GeneralOpenAIRequest) (*Request, *re
 	}
 	out.ToolChoice = choice
 
-	attachHostedTools(out, req.Hosted)
+	attachHostedTools(out, req)
 
 	return out, nil
 }
@@ -186,21 +198,45 @@ func ChatToResponsesRequest(req *relaymodel.GeneralOpenAIRequest) (*Request, *re
 // attachHostedTools declares on the Responses body the hosted tools the client
 // asked for, and records what Responses cannot express.
 //
-// The declaration type is always the canonical "web_search": this converter is
-// only ever reached from a client that speaks another protocol (a Responses
-// client talking to a Responses upstream is the passthrough and never gets
-// here), so there is no native Responses spelling to preserve.
-func attachHostedTools(out *Request, set *relaymodel.HostedSet) {
+// It reads the request rather than just its hosted set, because a hosted web
+// search reaches this converter two ways: as a neutral declaration (a Claude or
+// Responses client) and as the client's own chat-level `web_search_options`
+// toggle (a chat client). Both name the same upstream tool, and neither may be
+// dropped on the floor.
+//
+// The declaration type is always the canonical "web_search": a Responses client
+// talking to a Responses upstream is the passthrough and never gets here, so
+// there is no native Responses spelling to preserve.
+func attachHostedTools(out *Request, req *relaymodel.GeneralOpenAIRequest) {
+	set := req.Hosted
 	if set == nil {
-		return
+		// A chat client that set the toggle itself carries no hosted set at all;
+		// one is made so recording a loss on this path is never a silent no-op.
+		set = &relaymodel.HostedSet{}
 	}
+	declared := map[string]bool{}
 	for _, def := range set.Definitions {
-		switch relaymodel.HostedResponsesDeclarationType(def.Kind) {
-		case "":
+		t := relaymodel.HostedResponsesDeclarationType(def.Kind)
+		if t == "" {
 			set.AddLoss(relaymodel.UnsupportedHostedLoss("OpenAI Responses", def))
-		default:
-			out.Tools = append(out.Tools, ToolDef{Type: relaymodel.HostedResponsesDeclarationType(def.Kind)})
+			continue
 		}
+		declared[t] = true
+		out.Tools = append(out.Tools, responsesWebSearchTool(set, t, def.WebSearch, def.Path))
+	}
+	// The client's own chat toggle. Chat Completions spells hosted web search as
+	// web_search_options and nothing else, so this is the same declaration
+	// arriving by the other road; declaring it twice would be rejected by the
+	// upstream, and the client's explicit field is the one that wins.
+	if req.WebSearchOptions != nil && !declared["web_search"] {
+		opts := &relaymodel.HostedSearchOptions{
+			SearchContextSize: req.WebSearchOptions.SearchContextSize,
+			// The chat spelling nests the fields one level deeper than the
+			// Responses declaration; the neutral form is the flat one, so it is
+			// unwrapped here and re-emitted as the declaration expects.
+			UserLocation: relaymodel.HostedUserLocation(req.WebSearchOptions.UserLocation),
+		}
+		out.Tools = append(out.Tools, responsesWebSearchTool(set, "web_search", opts, "web_search_options"))
 	}
 	if set.ForcedChoice == nil {
 		return
@@ -212,6 +248,34 @@ func attachHostedTools(out *Request, set *relaymodel.HostedSet) {
 	set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagForcedChoiceDowngraded, set.ForcedChoice.Path,
 		"OpenAI Responses 无法强制使用托管工具 %s，已降级为自动选择",
 		relaymodel.DescribeHosted(*set.ForcedChoice)))
+}
+
+// responsesWebSearchTool builds the declaration, carrying the search knobs
+// Responses can express and recording the ones it cannot.
+//
+// Responses' web search takes a context size, a location and an ALLOW filter.
+// Claude's two extras do not survive: max_uses and blocked_domains have no
+// field here, so they become diagnostics rather than quietly changing what the
+// upstream is allowed to do.
+func responsesWebSearchTool(set *relaymodel.HostedSet, toolType string, search *relaymodel.HostedSearchOptions, path string) ToolDef {
+	tool := ToolDef{Type: toolType}
+	if search == nil {
+		return tool
+	}
+	tool.SearchContextSize = search.SearchContextSize
+	tool.UserLocation = search.UserLocation
+	if len(search.AllowedDomains) > 0 {
+		tool.Filters = &ToolFilters{AllowedDomains: search.AllowedDomains}
+	}
+	if search.MaxUses != nil {
+		set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedSearchLimit, path,
+			"OpenAI Responses 无法表达搜索次数上限 max_uses=%d", *search.MaxUses))
+	}
+	if len(search.BlockedDomains) > 0 {
+		set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedDomainFilter, path,
+			"OpenAI Responses 的 web_search 只支持 allowed_domains 白名单，无法表达 blocked_domains 黑名单"))
+	}
+	return tool
 }
 
 // checkUntranslatableFields refuses the chat fields this translation cannot

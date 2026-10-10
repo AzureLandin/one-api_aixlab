@@ -485,7 +485,7 @@ func parseResponsesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpen
 			if raw, ok := tool["search_context_size"]; ok {
 				_ = json.Unmarshal(raw, &opts.SearchContextSize)
 			}
-			opts.UserLocation = rawOf(tool, "user_location")
+			opts.UserLocation = relaymodel.HostedUserLocation(rawOf(tool, "user_location"))
 			if filters, ok := tool["filters"]; ok {
 				var f map[string]json.RawMessage
 				if json.Unmarshal(filters, &f) == nil {
@@ -632,9 +632,11 @@ func renderResponsesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 		return nil
 	}
 	items := make([]map[string]any, 0, len(hosted.Items))
-	for _, it := range hosted.Items {
+	for i, it := range hosted.Items {
 		itemType := relaymodel.HostedResponsesItemType(it.Kind)
 		if itemType == "" {
+			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, pathOfHosted(i),
+				"OpenAI Responses 无法表达托管工具产物 %s", it.Kind))
 			continue
 		}
 		item := map[string]any{"type": itemType}
@@ -649,26 +651,46 @@ func renderResponsesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 			if action := relaymodel.RawToValue(it.Action); action != nil {
 				item["action"] = action
 			}
+			if len(it.Results) > 0 {
+				// A web_search_call has no field for the results themselves: the
+				// protocol reports them to the model inline and cites them as
+				// annotations on the text. Claude's results are provider-encrypted,
+				// so they could not be carried even if there were a field.
+				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResultOmitted, pathOfHosted(i)+".results",
+					"Claude 的 web_search_tool_result 内容无法写进 Responses 的 web_search_call（该协议把搜索结果内联给模型、以 citation 呈现），仅保留 status 与 action"))
+			}
 		case relaymodel.HostedMCP:
+			if it.Name == "" || it.ServerLabel == "" {
+				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, pathOfHosted(i),
+					"Responses 的 mcp_call 需要 name 与 server_label，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
+				continue
+			}
 			item["name"] = it.Name
 			item["server_label"] = it.ServerLabel
-			if len(it.Arguments) > 0 {
-				item["arguments"] = rawStringOr(it.Arguments, "{}")
+			// `arguments` is a JSON-encoded string on this wire, not an object.
+			args, ok := relaymodel.HostedMCPArgumentsString(it.Arguments)
+			if !ok {
+				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".arguments",
+					"Responses 的 mcp_call.arguments 只能是 JSON 字符串，上游给出的入参不是对象"))
+				continue
 			}
-			if len(it.Output) > 0 {
-				item["output"] = rawStringOr(it.Output, "")
-			}
-			if it.Error != nil {
-				errObj := map[string]any{}
-				if it.Error.Message != "" {
-					errObj["message"] = it.Error.Message
-				}
-				if it.Error.Code != nil {
-					errObj["code"] = it.Error.Code
-				}
-				if len(errObj) > 0 {
+			item["arguments"] = args
+			if it.Failed() {
+				// A failed call reports the error INSTEAD of an output, which is
+				// how the protocol distinguishes "the call returned this" from
+				// "the call did not return". The item is still emitted — the call
+				// really happened, and dropping it would hide the attempt.
+				if errObj := mcpErrorObject(it.Error); len(errObj) > 0 {
 					item["error"] = errObj
 				}
+			} else {
+				out, ok := relaymodel.HostedMCPResultString(it.Output)
+				if !ok {
+					hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".output",
+						"Responses 的 mcp_call.output 只能是字符串，上游给出的结果无法降为该形式"))
+					continue
+				}
+				item["output"] = out
 			}
 		}
 		items = append(items, item)
@@ -676,17 +698,20 @@ func renderResponsesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 	return items
 }
 
-// rawStringOr renders a raw fragment as the JSON string a wire field expects:
-// a JSON string decodes to its contents, anything else is passed through as its
-// own JSON text. An absent fragment becomes fallback.
-func rawStringOr(raw json.RawMessage, fallback string) string {
-	if len(raw) == 0 {
-		return fallback
+// mcpErrorObject renders a failed MCP call's error in the Responses shape
+// ({"code":…,"message":…}), which is what the protocol's own mcp_call carries.
+func mcpErrorObject(err *relaymodel.Error) map[string]any {
+	if err == nil {
+		return nil
 	}
-	if s, ok := decodeString(raw); ok {
-		return s
+	obj := map[string]any{}
+	if err.Message != "" {
+		obj["message"] = err.Message
 	}
-	return string(raw)
+	if err.Code != nil {
+		obj["code"] = err.Code
+	}
+	return obj
 }
 
 func responseID(chatID string) string {

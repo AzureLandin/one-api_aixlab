@@ -11,6 +11,7 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/model"
+	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
@@ -30,6 +31,9 @@ func validateChannelConfig(configJSON string) error {
 	if cfg.UpstreamProtocol != "" && !upstream.Valid(cfg.UpstreamProtocol) {
 		return fmt.Errorf("未知的上游协议 %q，可选值：openai-chat / openai-responses / anthropic-messages / compatible",
 			cfg.UpstreamProtocol)
+	}
+	if !relaymodel.ValidToolLossPolicy(cfg.ToolLossPolicy) {
+		return fmt.Errorf("未知的托管工具丢损策略 %q，可选值：allow / safe / strict", cfg.ToolLossPolicy)
 	}
 	return nil
 }

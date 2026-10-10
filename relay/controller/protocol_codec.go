@@ -17,6 +17,12 @@ import (
 	"github.com/songquanpeng/one-api/relay/upstream"
 )
 
+// anthropicUpstreamUnsupportedField is the code for a chat request field the
+// Anthropic Messages API cannot carry. It mirrors the Responses codec's
+// responses_upstream_unsupported_field: the field is named in the message, and
+// refusing beats sending a request whose promise silently disappears.
+const anthropicUpstreamUnsupportedField = "anthropic_upstream_unsupported_field"
+
 // upstreamCodec translates between the normalized OpenAI chat shape that the
 // protocol entry points, their renderers and the usage layer speak, and the wire
 // protocol the selected channel actually speaks (implementation doc §6.1/§6.6).
@@ -110,9 +116,13 @@ func (openaiChatCodec) Protocol() upstream.Protocol { return upstream.OpenAIChat
 
 func (openaiChatCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
 	// A chat body is this struct marshalled, so this is the only place a hosted
-	// declaration can be folded in for a chat upstream.
+	// declaration can be folded in for a chat upstream. No stream bridge is
+	// needed here: the toggle is the whole of what chat can say, and it works
+	// the same whether the answer streams or not.
 	attachChat(req)
-	logHostedLosses(m.ChannelId, req.Hosted)
+	if bizErr := hostedRequestRefusal(m, req); bizErr != nil {
+		return nil, "", bizErr
+	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -188,10 +198,26 @@ type anthropicChatCodec struct{}
 func (anthropicChatCodec) Protocol() upstream.Protocol { return upstream.AnthropicMessages }
 
 func (anthropicChatCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+	if req.WebSearchOptions != nil {
+		// A chat client's own hosted-web-search toggle. Anthropic spells hosted
+		// web search as a TOOL in `tools` (web_search_20250305), so there is no
+		// field to translate the toggle into and nothing to infer — inventing a
+		// tool declaration would change what the model is asked to do. This is a
+		// named refusal rather than the hosted-loss exception: the exception
+		// covers a tool the target cannot EXPRESS, and this is a client field
+		// with no counterpart at all, the same class as `stop` or `seed` on a
+		// Responses upstream.
+		return nil, "", openai.ErrorWrapper(
+			fmt.Errorf("web_search_options：Anthropic Messages 上游没有等价的托管搜索开关（其托管搜索是 tools 中的 web_search 工具），请改用该渠道的 Anthropic 入口声明"),
+			anthropicUpstreamUnsupportedField, http.StatusBadRequest)
+	}
 	// As with the Responses codec, the converter owns the hosted fold-in: it is
 	// what knows where a message boundary lands in Anthropic's message list.
 	converted := anthropic.ConvertRequest(*req)
-	logHostedLosses(m.ChannelId, req.Hosted)
+	noteUnbridgedHostedStream(req)
+	if bizErr := hostedRequestRefusal(m, req); bizErr != nil {
+		return nil, "", bizErr
+	}
 
 	body, err := json.Marshal(converted)
 	if err != nil {
@@ -213,6 +239,11 @@ func (anthropicChatCodec) NonStreamResponse(m *meta.Meta, resp *http.Response) (
 	}
 
 	textResponse := anthropic.ResponseClaude2OpenAI(&claudeResponse)
+	// The hosted artifacts are lifted out beside the conversion, not through it:
+	// ResponseClaude2OpenAI is shared with the legacy chat path, whose view of a
+	// hosted block must not change. A client protocol that can express them
+	// renders them; one that cannot (a chat client) simply never reads the field.
+	textResponse.Hosted = anthropic.HostedOutputOf(&claudeResponse)
 	textResponse.Model = m.ActualModelName
 	textResponse.Usage = anthropic.RelayUsage(claudeResponse.Usage)
 	usage := anthropicResponseUsage(m, textResponse)
@@ -360,7 +391,10 @@ func (openaiResponsesCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpe
 		// with the field dropped.
 		return nil, "", bizErr
 	}
-	logHostedLosses(m.ChannelId, req.Hosted)
+	noteUnbridgedHostedStream(req)
+	if bizErr := hostedRequestRefusal(m, req); bizErr != nil {
+		return nil, "", bizErr
+	}
 	body, err := json.Marshal(converted)
 	if err != nil {
 		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
@@ -393,6 +427,11 @@ func (openaiResponsesCodec) NonStreamResponse(m *meta.Meta, resp *http.Response)
 		// reply, so it is refused with the name of what could not be mapped.
 		return nil, nil, &relaymodel.ErrorWithStatusCode{Error: *convertErr, StatusCode: http.StatusBadGateway}
 	}
+	// Hosted artifacts are lifted out beside the conversion: ToChatResponse
+	// answers "what does this answer say" for the chat envelope, and a hosted
+	// item says nothing there. A client protocol that can express them renders
+	// them; one that cannot simply never reads the field.
+	textResponse.Hosted = openai_responses.HostedOutputOf(&upstream)
 	// The renderers read the usage off the same value the recorder persists, so
 	// the one ToChatResponse normalized is returned by reference.
 	return textResponse, &textResponse.Usage, nil

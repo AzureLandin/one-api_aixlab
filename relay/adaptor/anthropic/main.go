@@ -235,7 +235,17 @@ func hostedClaudeTools(set *model.HostedSet) []Tool {
 			tool.MaxUses = def.WebSearch.MaxUses
 			tool.AllowedDomains = def.WebSearch.AllowedDomains
 			tool.BlockedDomains = def.WebSearch.BlockedDomains
+			// Claude's user_location is the flat spelling, which is the neutral
+			// one, so it crosses over untouched.
 			tool.UserLocation = model.RawToValue(def.WebSearch.UserLocation)
+			if def.WebSearch.SearchContextSize != "" {
+				// Claude's web_search has no context-size knob. It is reported
+				// rather than dropped: it changes how much the upstream reads, so
+				// an operator who set it deserves to know it did not apply.
+				set.AddLoss(model.NewHostedLoss(model.DiagUnsupportedSearchLimit, def.Path,
+					"Anthropic Messages 的 web_search 没有 search_context_size 开关（收到 %q）",
+					def.WebSearch.SearchContextSize))
+			}
 		}
 		out = append(out, tool)
 	}
@@ -264,7 +274,7 @@ func hostedHistoryBlocks(h model.HostedHistoryItem) []Content {
 			}}
 		}
 		return []Content{
-			{Type: "server_tool_use", Id: h.ID, Name: "web_search", Input: claudeWebSearchInput(h.Action)},
+			{Type: "server_tool_use", Id: h.ID, Name: "web_search", Input: model.HostedClaudeSearchInput(h.Action)},
 			{Type: "web_search_tool_result", ToolUseId: h.ID, Content: result},
 		}
 	case model.HostedMCP:
@@ -276,20 +286,6 @@ func hostedHistoryBlocks(h model.HostedHistoryItem) []Content {
 	default:
 		return nil
 	}
-}
-
-// claudeWebSearchInput narrows a Responses search action back to the input
-// object Claude's server_tool_use carries. The action is the richer of the two
-// shapes ("{type,query}"); Claude's input is "{query}", and an extra key there
-// is not something the upstream is documented to ignore.
-func claudeWebSearchInput(action json.RawMessage) any {
-	var m map[string]any
-	if err := json.Unmarshal(action, &m); err == nil {
-		if q, ok := m["query"]; ok {
-			return map[string]any{"query": q}
-		}
-	}
-	return model.RawToValue(action)
 }
 
 // stopSequencesOf reads the OpenAI `stop` field, which the spec allows to be

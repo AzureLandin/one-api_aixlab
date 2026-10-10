@@ -66,6 +66,18 @@ type ChannelConfig struct {
 	// the translation path and drop the native fields (cache_control, thinking,
 	// hosted tools) that same-protocol passthrough preserves.
 	UpstreamProtocol string `json:"upstream_protocol,omitempty"`
+	// ToolLossPolicy decides what happens when a client's hosted (built-in)
+	// tool cannot be expressed in the upstream protocol this channel speaks.
+	// "allow" (the default, and the empty string) drops it, logs a diagnostic
+	// and lets the request succeed — the reference implementation's behaviour.
+	// "safe" refuses the request by name on any diagnostic that changes what
+	// the model is asked to do; "strict" refuses on any diagnostic at all.
+	//
+	// It is consulted on the REQUEST phase only. A response or a stream is never
+	// refused by policy: by then the upstream has done the work, and refusing to
+	// hand back an artifact the client asked for would turn a lossy answer into
+	// no answer.
+	ToolLossPolicy string `json:"tool_loss_policy,omitempty"`
 }
 
 // ModelConfig is the optional per-model override block configured on a channel.

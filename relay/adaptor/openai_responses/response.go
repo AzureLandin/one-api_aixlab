@@ -1,6 +1,7 @@
 package openai_responses
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -45,6 +46,13 @@ type OutputItem struct {
 	// a non-conformant upstream may send an object instead of the string the
 	// protocol documents; argumentsString handles both.
 	Arguments any `json:"arguments"`
+	// Action/ServerLabel/Output/Error belong to a hosted item (web_search_call,
+	// mcp_call). They are read only by the hosted extraction; a function_call
+	// item leaves all four empty, and `omitempty` keeps its wire shape as it was.
+	Action      json.RawMessage `json:"action,omitempty"`
+	ServerLabel string          `json:"server_label,omitempty"`
+	Output      json.RawMessage `json:"output,omitempty"`
+	Error       json.RawMessage `json:"error,omitempty"`
 }
 
 // OutputContent is one content part of a message item.
@@ -219,6 +227,13 @@ func (r *Response) decode() (answer, *relaymodel.Error) {
 				return out, err
 			}
 			out.calls = append(out.calls, call)
+		case "web_search_call", "mcp_call":
+			// A hosted artifact. It contributes no answer text and no function call
+			// to the chat envelope, but it is not "unmapped" either: HostedOutputOf
+			// lifts it into the neutral hosted set, and a client protocol that has a
+			// vocabulary for it renders it. Reporting it here would log a warning
+			// about every successful search.
+			continue
 		case "":
 			// An item with no type is not a statement the gateway can classify.
 			out.unmapped = append(out.unmapped, "output_item.<empty type>")

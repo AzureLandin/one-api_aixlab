@@ -262,21 +262,10 @@ func claudeHostedCall(blk map[string]json.RawMessage, before int) relaymodel.Hos
 
 // claudeSearchAction normalizes Claude's server_tool_use input into the search
 // action both directions share. Action is the richer of the two shapes, so it
-// is what the neutral form carries; the Anthropic attach narrows it back.
+// is what the neutral form carries; the renderers narrow it back.
 func claudeSearchAction(blk map[string]json.RawMessage) json.RawMessage {
-	var input map[string]any
-	if raw := rawOf(blk, "input"); len(raw) > 0 {
-		_ = json.Unmarshal(raw, &input)
-	}
-	action := map[string]any{"type": "search"}
-	if q, ok := input["query"]; ok {
-		action["query"] = q
-	}
-	raw, err := json.Marshal(action)
-	if err != nil {
-		return nil
-	}
-	return raw
+	return relaymodel.HostedSearchAction(
+		relaymodel.HostedSearchQueryFromClaudeInput(relaymodel.RawToValue(rawOf(blk, "input"))))
 }
 
 // attachHostedResult pairs a hosted result block with the call it answers,
@@ -292,7 +281,11 @@ func attachHostedResult(hist []relaymodel.HostedHistoryItem, toolUseId, blockTyp
 			continue
 		}
 		if isMCP {
-			hist[k].Output = content
+			// Claude spells an MCP result as an array holding one text block; the
+			// neutral form holds the plain string, which is also what the Responses
+			// `output` field it may be sent on to carries. Folding it here, at the
+			// boundary, keeps the two directions from disagreeing about the shape.
+			hist[k].Output = relaymodel.HostedMCPResultAsString(content)
 		} else {
 			hist[k].Results = content
 		}
@@ -472,7 +465,7 @@ func parseMessagesTools(raw json.RawMessage, normalized *relaymodel.GeneralOpenA
 func claudeWebSearchOptions(tool map[string]json.RawMessage) *relaymodel.HostedSearchOptions {
 	opts := &relaymodel.HostedSearchOptions{
 		SearchContextSize: jsonStringOf(tool, "search_context_size"),
-		UserLocation:      rawOf(tool, "user_location"),
+		UserLocation:      relaymodel.HostedUserLocation(rawOf(tool, "user_location")),
 		AllowedDomains:    jsonStringListOf(tool, "allowed_domains"),
 		BlockedDomains:    jsonStringListOf(tool, "blocked_domains"),
 	}
@@ -622,9 +615,12 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 
 // renderMessagesHosted turns the upstream's hosted artifacts into the Claude
 // content blocks that describe them: a call block and its result block, per
-// artifact. A kind Claude has no block for is skipped — the client never
-// declared that tool, so there is nothing to hand back, and inventing a block
-// type would put a shape on the wire no Claude client can read.
+// artifact.
+//
+// What it cannot express is recorded on the output rather than invented or
+// silently dropped, and rendering still succeeds — the response phase does not
+// reject under any policy, because the upstream has already done the work and
+// failing now would throw away an answer the client paid for.
 func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 	if hosted == nil || len(hosted.Items) == 0 {
 		return []map[string]any{}
@@ -633,6 +629,23 @@ func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 	for i, it := range hosted.Items {
 		name := relaymodel.HostedClaudeBlockName(it.Kind)
 		if name == "" {
+			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedTool, pathOfHosted(i),
+				"Anthropic Messages 无法表达托管工具产物 %s", it.Kind))
+			continue
+		}
+		if it.Kind == relaymodel.HostedWebSearch {
+			// A web search is the one artifact Claude cannot be handed at all. Its
+			// result block is required to carry provider-encrypted search results,
+			// which only Anthropic can produce, and a call block without one is not
+			// a shape the API accepts. So the whole artifact is dropped and named,
+			// which is what the reference implementation does here too.
+			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagWebSearchResponseUnrepresentable, pathOfHosted(i),
+				"上游的 web_search_call 无法转成 Anthropic 的 web_search_tool_result（其 content 必须是 Anthropic 加密签发的搜索结果，网关无法重建），已丢弃该条搜索记录"))
+			continue
+		}
+		if it.Name == "" || it.ServerLabel == "" {
+			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPIdentityMissing, pathOfHosted(i),
+				"Anthropic 的 mcp_tool_use 需要 name 与 server_name，上游只给了 name=%q server_label=%q", it.Name, it.ServerLabel))
 			continue
 		}
 		// Claude requires an id on the call block and the result to name it, so an
@@ -642,68 +655,51 @@ func renderMessagesHosted(hosted *relaymodel.HostedOutput) []map[string]any {
 		if id == "" {
 			id = "hosted_" + itoa(i)
 		}
-		if it.Kind == relaymodel.HostedWebSearch {
-			blocks = append(blocks,
-				map[string]any{
-					"type":  "server_tool_use",
-					"id":    id,
-					"name":  name,
-					"input": claudeSearchInput(it.Action),
-				},
-				map[string]any{
-					"type":        "web_search_tool_result",
-					"tool_use_id": id,
-					"content":     rawArrayOrEmpty(it.Results),
-				})
+		blocks = append(blocks, map[string]any{
+			"type":        "mcp_tool_use",
+			"id":          id,
+			"name":        it.Name,
+			"server_name": it.ServerLabel,
+			"input":       rawObjectOrEmpty(it.Arguments),
+		})
+		// A call that reported an outcome gets its result block; one still running
+		// has nothing to report yet. An outcome is an output or an error, and the
+		// error is the text a failed call has to show — otherwise the result would
+		// arrive with is_error set and nothing in it.
+		outcome := it.Output
+		if it.Failed() && len(outcome) == 0 && it.Error != nil && it.Error.Message != "" {
+			outcome = relaymodel.HostedJSONString(it.Error.Message)
+		}
+		if len(outcome) == 0 {
+			if it.Status != relaymodel.HostedStatusInProgress {
+				hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultMissing, pathOfHosted(i),
+					"上游的 mcp_call 状态为 %q 却既无 output 也无 error，没有可交回的调用结果", it.Status))
+			}
 			continue
 		}
-		call := map[string]any{
-			"type":  "mcp_tool_use",
-			"id":    id,
-			"name":  it.Name,
-			"input": rawObjectOrEmpty(it.Arguments),
+		// Claude spells an MCP result as an array holding one text block; the
+		// neutral form holds the plain string both protocols carry it as on the
+		// way in, so this is where it is wrapped back up.
+		result, ok := relaymodel.HostedMCPResultString(outcome)
+		if !ok {
+			hosted.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagMCPResultUnrepresentable, pathOfHosted(i)+".output",
+				"上游给出的 MCP 结果无法降为单个文本块，Anthropic 的 mcp_tool_result 只能承载文本"))
+			continue
 		}
-		if it.ServerLabel != "" {
-			call["server_name"] = it.ServerLabel
-		}
-		result := map[string]any{
+		blocks = append(blocks, map[string]any{
 			"type":        "mcp_tool_result",
 			"tool_use_id": id,
-			"content":     rawArrayOrEmpty(it.Output),
-		}
-		if it.Error != nil {
-			result["is_error"] = true
-		}
-		blocks = append(blocks, call, result)
+			"content":     []map[string]any{{"type": "text", "text": result}},
+			"is_error":    it.Failed(),
+		})
 	}
 	return blocks
 }
 
-// claudeSearchInput narrows the shared search action back to the `input` object
-// of a server_tool_use block. Anthropic spells a search as {"query": …} and
-// nothing else, while the neutral action also carries a `type`.
-func claudeSearchInput(action json.RawMessage) any {
-	var m map[string]any
-	if len(action) > 0 {
-		_ = json.Unmarshal(action, &m)
-	}
-	if q, ok := m["query"]; ok {
-		return map[string]any{"query": q}
-	}
-	return map[string]any{}
-}
-
-// rawArrayOrEmpty renders a hosted content field as the array Claude expects.
-// `content` on a hosted result block is always an array; an absent or
-// non-array value becomes an empty one rather than a null the client has to
-// special-case.
-func rawArrayOrEmpty(raw json.RawMessage) any {
-	if v := relaymodel.RawToValue(raw); v != nil {
-		if arr, ok := v.([]any); ok {
-			return arr
-		}
-	}
-	return []any{}
+// pathOfHosted names a hosted artifact the way a diagnostic should: by where it
+// sat in the response, so an operator can find the one that was dropped.
+func pathOfHosted(i int) string {
+	return "hosted_tools[" + itoa(i) + "]"
 }
 
 // rawObjectOrEmpty renders a hosted input/argument field as the object Claude
