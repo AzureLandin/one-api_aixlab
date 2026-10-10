@@ -103,6 +103,12 @@ type TextResponse struct {
 	// is not the same as "it produced none this time" being unknown — a
 	// non-hosted upstream simply never sets it.
 	Hosted *model.HostedOutput `json:"-"`
+	// CustomTools is the set of tool names the client declared as Responses
+	// custom (freeform) tools. They travel upstream as ordinary functions, so
+	// the renderer needs this to return their calls as custom_tool_call items
+	// rather than function_call ones. Like Hosted it is `json:"-"` and is
+	// grafted on by the relay from the parsed request.
+	CustomTools model.ResponsesCustomToolNames `json:"-"`
 }
 
 type EmbeddingResponseItem struct {

@@ -190,6 +190,12 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
 		return readErr
 	}
+	// The renderer has to know which tools the client declared as custom to
+	// hand their calls back in that shape, and only the request knows. Graft it
+	// onto the response the way the codecs graft Hosted, so Render keeps its
+	// signature and the messages path — which never has any — simply leaves it
+	// nil.
+	textResponse.CustomTools = normalized.CustomTools
 
 	envelope := entry.Render(textResponse, normalized.Model)
 	// Rendering records what the client's protocol could not carry back. Unlike

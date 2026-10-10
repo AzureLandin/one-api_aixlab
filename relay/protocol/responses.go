@@ -719,12 +719,28 @@ func RenderResponses(upstream *openai.TextResponse, model string) map[string]any
 			if itemID == "" {
 				itemID = responseID(upstream.Id) + "_call_" + itoa(i)
 			}
+			arguments := toolArgumentsToString(tc.Function.Arguments)
+			// A tool the client declared as custom went upstream as a function
+			// taking one string argument, so it comes back in that shape and has
+			// to be handed back in its own. Everything else is an ordinary
+			// function call and is rendered exactly as before.
+			if upstream.CustomTools.Has(tc.Function.Name) {
+				output = append(output, map[string]any{
+					"type":    "custom_tool_call",
+					"id":      itemID,
+					"call_id": tc.Id,
+					"name":    tc.Function.Name,
+					"input":   customToolInputFromArguments(arguments),
+					"status":  "completed",
+				})
+				continue
+			}
 			output = append(output, map[string]any{
 				"type":      "function_call",
 				"id":        itemID,
 				"call_id":   tc.Id,
 				"name":      tc.Function.Name,
-				"arguments": toolArgumentsToString(tc.Function.Arguments),
+				"arguments": arguments,
 				"status":    "completed",
 			})
 		}
@@ -882,6 +898,28 @@ func toolArgumentsToString(args any) string {
 		}
 		return "{}"
 	}
+}
+
+// customToolInputFromArguments unwraps the raw input a custom tool's function
+// call carries: upstream saw a function whose only argument is a string, so the
+// call arrives as {"input": "..."} and the client expects the bare text.
+//
+// Any other shape is returned unchanged. A model that answered with something
+// else is still answering, and handing the client an empty input would throw
+// that away — the same fallback the reference implementation uses.
+func customToolInputFromArguments(arguments string) string {
+	var value map[string]any
+	if err := json.Unmarshal([]byte(arguments), &value); err != nil {
+		return arguments
+	}
+	input, ok := value[customToolInputArgument]
+	if !ok {
+		return arguments
+	}
+	if text, ok := input.(string); ok {
+		return text
+	}
+	return arguments
 }
 
 // buildResponsesUsage maps the normalized usage onto Responses usage fields,
