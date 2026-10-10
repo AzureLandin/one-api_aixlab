@@ -307,11 +307,13 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 迁移中断重试、重复执行、备份恢复均验证 — 集成测试重复 Migrate x3（中断重试等价）；矩阵备份(drop+restore)恢复；重启幂等。
 - [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
 
-**总门禁**：`go build ./...` ✅ · `gofmt -l $(git ls-files '*.go')` ✅ 空 · `go test $(go list ./... | grep -v common/image)` ✅ · 端到端冒烟 `pass=142 fail=0` ✅（阶段 9 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+**总门禁**：`go build ./...` ✅ · `go vet ./...` ✅ 空（须用干净的 `GOCACHE`，见下）· `gofmt -l $(git ls-files '*.go')` ✅ 空 · `go test $(go list ./... | grep -v common/image)` ✅ · 端到端冒烟 `pass=142 fail=0` ✅（阶段 9 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
 
-**`go vet` 的一处存量红（阶段 9 记录，非本阶段引入）**：本机 Go 1.26.8 工具链下 `go vet ./...` 报一条 `common/message/email.go:67:44: address format "%s:%d" does not work with IPv6`（`hostport` 分析器）。该文件最后一次改动是 `ececfe5`（2025-02-02，上游），早于本分支全部提交，且本阶段未触碰 `common/message`；因此这是工具链版本带来的存量发现，而不是阶段 9 的回归。**本次不修**：它属于另一个子系统，按"迁移/协议/UI 改动分开提交"的约定不该折进文档提交，也不该折进任何阶段 9 提交。本阶段改动到的全部包（`./relay/...`、`./model/...`、`./controller/...`）`go vet` 为空。
+**`go vet` 的一处存量红（阶段 9 发现，已修复）**：本机 Go 1.26.8 工具链下 `go vet ./...` 报一条 `common/message/email.go:67:44: address format "%s:%d" does not work with IPv6`（`hostport` 分析器）。该文件最后一次改动是 `ececfe5`（2025-02-02，上游），早于本分支全部提交，因此这是工具链版本带来的存量发现，而不是阶段 9 的回归。修复单独成提交：三处 `fmt.Sprintf("%s:%d", host, port)` 收成一处 `net.JoinHostPort(host, strconv.Itoa(port))`。原写法在 IPv6 字面量主机上会拼出非法地址（`::1:25`），`JoinHostPort` 会补方括号；对普通主机名输出逐字相同，故对现有部署无行为变更。修复后全仓 `go vet ./...` 为空。
 
-**修订说明**：上一版此条曾无条件写 `go vet ✅`，与工具链实际输出不符，阶段 9 一并更正。
+**附带发现，影响验证方法本身**：`go vet` 的结果按包缓存在 `GOCACHE` 里，而本仓约定的 `GOCACHE=$PWD/.gocache` 中存着一份**过期的"干净"结果**——直接跑 `go vet ./...` 会重放它而**不报**这个真实缺陷；同样的源、同样的工具链，换一个空缓存目录或加 `-a` 才复现。所以"用仓内缓存跑 vet 得到空输出"不能当作证据，本阶段此前的 `go vet` 检查正是这样被掩盖的（`relay/model/controller` 三个包在干净缓存下确认仍为空，结论不变）。要点名验证 vet 时应另用一个干净的 `GOCACHE` 或加 `-a`。
+
+**修订说明**：更早一版此条曾无条件写 `go vet ✅`，与工具链实际输出不符；阶段 9 先改为如实记录并标注"本次不修"，随后按用户要求单独提交修复，并补上上面那条缓存陷阱。
 
 ---
 
@@ -519,7 +521,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - **改靶子（改靶不删）**：`responses_test.go` 四个"托管工具被丢弃且不报错"的用例，行为已变成"被抽取进 `Hosted`"，断言搬进 `responses_hosted_test.go`；`openai_responses/request_test.go` 与 `stream_test.go` 的两处改名，因为原被当作"编程错误/unmapped"的托管条目现在有了归属。
 - **冒烟**：`mock_upstream.py` 增加一对正交开关——`wants_hosted`（声明了托管工具吗）与 `runs_hosted`（额外要求请求带 `use-hosted-search`，声明使工具可用，请求才让上游真的去搜）。两者分开，才能让同样声明了 `web_search_20250305` 的直通格子（16c/16g）继续拿到逐字节保真的原信封，而只有真的要求搜索的格子才长出搜索产物。另给 `messages_stream` 补了托管分支（此前没有）。新增 11 格：16h-1..16h-9（B1）与 16i-1/16i-2（B2）。诊断用 `log_since`（按字节偏移截取）断言而非整文件 grep——同一批 code 会从数条路由发出，整文件 grep 会让后面的格子满足前面格子的断言，测试就失去了定位能力。
 - **计数（刻意更新并保持精确相等，非 `>=`）**：§17/§18 `22→32`，§19 `15→23`，§20 `7→9`，§21 `cache_hit_rate 169/221→249/321`、`cache_coverage 7/22→9/32`、`not_reported_cache_calls 15→23`；`cache_write_input_tokens` 仍为 `0`（没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"）。`RESULT pass=109 → pass=142 fail=0`。
-- **命令**：`go build ./...` ✅ · `gofmt -l $(git ls-files '*.go')` 空 ✅ · `go test $(go list ./... | grep -v common/image)` ✅ · `bash scripts/smoke/run_smoke.sh` → `pass=142 fail=0` ✅ · `go vet ./relay/... ./model/... ./controller/...` 空 ✅（全仓 `go vet ./...` 的一处存量红见 §13 说明，非本阶段引入）。`common/image` 的 jpeg 失败仍是 §0.3 既存红线，未折进任何提交。
+- **命令**：`go build ./...` ✅ · `gofmt -l $(git ls-files '*.go')` 空 ✅ · `go test $(go list ./... | grep -v common/image)` ✅ · `bash scripts/smoke/run_smoke.sh` → `pass=142 fail=0` ✅ · `go vet ./...` 空 ✅（须用干净的 `GOCACHE`：仓内 `.gocache` 存着过期的干净结果，会掩盖真实诊断，见 §13 的缓存陷阱）。`common/image` 的 jpeg 失败仍是 §0.3 既存红线，未折进任何提交。
 
 ### 剩余限制（阶段 10 输入）
 
