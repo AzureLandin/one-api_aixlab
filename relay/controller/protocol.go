@@ -143,11 +143,19 @@ func relayProtocolHelper(c *gin.Context, entry *protocolEntry) *relaymodel.Error
 	adaptor.Init(meta)
 
 	// Rewrite the request in the upstream's own protocol: a chat completion for a
-	// chat upstream, a Messages call for an Anthropic one.
-	requestBody, requestPath, err := codec.RequestBody(meta, normalized)
-	if err != nil {
-		recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
-		return openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
+	// chat upstream, a Messages call for an Anthropic one, a response for a
+	// Responses one.
+	requestBody, requestPath, bodyErr := codec.RequestBody(meta, normalized)
+	if bodyErr != nil {
+		// A request the upstream's protocol cannot express is a pre-flight
+		// rejection (4xx, named), so — like the parse and validation rejections
+		// above — nothing was sent and no usage row is written. A 5xx here is this
+		// gateway failing to marshal a body it built, which follows the existing
+		// rule of recording a real attempt's failure.
+		if bodyErr.StatusCode >= http.StatusInternalServerError {
+			recordUsage(ctx, meta, normalized.Model, nil, relaymodel.UsageStatusError)
+		}
+		return bodyErr
 	}
 	savedPath := meta.RequestURLPath
 	meta.RequestURLPath = requestPath

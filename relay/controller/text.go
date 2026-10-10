@@ -20,6 +20,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/upstream"
 	usagelog "github.com/songquanpeng/one-api/relay/usage"
 )
 
@@ -55,6 +56,19 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
 	}
 	adaptor.Init(meta)
+
+	// A channel declared as speaking the Responses API is served by the
+	// translation in relay/adaptor/openai_responses rather than by the adaptor's
+	// own conversion. The branch is on the declared protocol and not on "the
+	// protocol is not chat", so the already-working Anthropic upstream keeps going
+	// through its adaptor unchanged.
+	if upstream.Resolve(meta.Config.UpstreamProtocol, meta.APIType) == upstream.OpenAIResponses {
+		if bizErr := responsesUpstreamSupported(meta); bizErr != nil {
+			recordUsage(ctx, meta, textRequest.Model, nil, model.UsageStatusError)
+			return bizErr
+		}
+		return relayResponsesChat(c, meta, textRequest, adaptor, systemPromptReset)
+	}
 
 	// get request body
 	requestBody, err := getRequestBody(c, meta, textRequest, adaptor)

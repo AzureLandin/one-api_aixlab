@@ -14,7 +14,10 @@ rm -f one-api.db mock.log oneapi.log jar_root.txt jar_user.txt \
       tmp_tool_chat.json tmp_tool_chat_sse.txt tmp_tool_resp.json tmp_tool_resp_sse.txt \
       tmp_tool_msg.json tmp_tool_msg_sse.txt tmp_tool_turn.json \
       tmp_ch_anthropic.json tmp_ch_gemini.json tmp_pass_msg.json tmp_pass_msg_sse.h \
-      tmp_pass_msg_sse.txt tmp_pass_reject.json tmp_pass_chat.json mock_last_messages.json
+      tmp_pass_msg_sse.txt tmp_pass_reject.json tmp_pass_chat.json mock_last_messages.json \
+      tmp_xlate_resp.json tmp_xlate_resp_sse.h tmp_xlate_resp_sse.txt mock_last_responses.json \
+      tmp_ch_responses.json tmp_chat_resp.json tmp_chat_resp_sse.txt tmp_msg_resp.json \
+      tmp_msg_resp_sse.txt tmp_tool_chatresp.json tmp_tool_msgresp.json tmp_cache_resp.json
 
 # 构建被测二进制（缓存放仓库内 .gocache，绕开只读的 ~/.cache）
 GOCACHE="$REPO/.gocache" go build -o ./one-api "$REPO" || { echo "FATAL: build failed"; exit 2; }
@@ -345,33 +348,177 @@ sleep 1
 XU=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=50 and output_tokens=12 and total_tokens=62 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
 [ "$XU" = 4 ] && { echo "PASS: translated rows match the mirrored ones (4 = 2 mirror + 2 codec)"; pass=$((pass+1)); } || { echo "FAIL: matching anthropic rows=$XU (want 4)"; fail=$((fail+1)); }
 
+# 工具声明（三种客户端协议各自的形状）。定义在这里，供 16f 的跨协议工具格子和
+# 后面的 22 用同一份夹具。
+CHAT_TOOLS='[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}},{"type":"function","function":{"name":"get_time","description":"time","parameters":{"type":"object"}}}]'
+RESP_TOOLS='[{"type":"function","name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"type":"function","name":"get_time","description":"time","parameters":{"type":"object"}}]'
+MSG_TOOLS='[{"name":"get_weather","description":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"name":"get_time","description":"time","input_schema":{"type":"object"}}]'
+
+# 16f. 第三个上游协议：声明 openai-responses 的 OpenAI 系渠道。
+#      chat 入口经 RelayTextHelper 的分支直接驱动转换器，messages 入口经 codec 驱动同一套
+#      转换器与同一个读流器——两条路都把上游的 response.* 事件翻成规范化 chat chunk，
+#      再交给各自的客户端渲染器。上游的 usage 用 Responses 自己的字段名。
+curl -s -b jar_root.txt -X POST http://127.0.0.1:13000/api/channel/ \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"mock-responses","type":1,"base_url":"http://127.0.0.1:19999","key":"sk-responses",
+       "models":"gpt-5-mock","group":"default","priority":1,"weight":1,"status":1,
+       "config":"{\"upstream_protocol\":\"openai-responses\"}"}' > tmp_ch_responses.json
+check "create openai-responses channel" true "$(sed -n 's/.*"success":\([a-z]*\).*/\1/p;q' tmp_ch_responses.json)"
+
+# 16f-1 chat → responses 非流式：客户端拿 chat.completion，用量来自 response.usage
+CODE=$(curl -s -o tmp_chat_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","messages":[{"role":"user","content":"hi"}]}')
+check "chat→responses 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: chat envelope from a Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_chat_resp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_chat_resp.json'))
+c=(d.get('choices') or [{}])[0]
+u=d.get('usage') or {}
+ok=(d.get('object')=='chat.completion' and c.get('finish_reason')=='stop'
+    and (c.get('message') or {}).get('content')=='ok'
+    and (u.get('prompt_tokens'),u.get('completion_tokens'),u.get('total_tokens'))==(7,5,12))
+sys.exit(0 if ok else 1)
+PY
+# 16f-2 上游收到的是 Responses 体而非 chat 体：input 条目、没有 messages。
+python3 - <<'PY' && { echo "PASS: upstream body is a Responses body"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+ok=('input' in b and 'messages' not in b and isinstance(b.get('input'),list)
+    and b['input'][0].get('role')=='user')
+sys.exit(0 if ok else 1)
+PY
+
+# 16f-3 chat → responses 流式：逐 chunk 输出 chat.completion.chunk，末尾补 [DONE]
+#      （Responses 上游自己没有结束标记，[DONE] 是 chat 路径写出来的）
+curl -s -N -o tmp_chat_resp_sse.txt -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+python3 - <<'PY' && { echo "PASS: responses upstream streamed as chat chunks"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 500 tmp_chat_resp_sse.txt)"; fail=$((fail+1)); }
+import json,sys
+deltas=[]; usage=None; done=False
+for line in open('tmp_chat_resp_sse.txt'):
+    if line.strip()=='data: [DONE]': done=True
+    if not line.startswith('data: ') or '[DONE]' in line: continue
+    try: ch=json.loads(line[6:])
+    except Exception: continue
+    if ch.get('usage'): usage=ch['usage']
+    for c in ch.get('choices') or []:
+        delta=c.get('delta') or {}
+        if 'content' in delta: deltas.append(delta['content'])
+ok=(done and deltas==['o','k'] and usage is not None
+    and (usage.get('prompt_tokens'),usage.get('completion_tokens'))==(7,5))
+sys.exit(0 if ok else 1)
+PY
+
+# 16f-4 messages → responses 非流式：codec 用同一套转换器，system 折进 instructions
+CODE=$(curl -s -o tmp_msg_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":"hi"}]}')
+check "messages→responses 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: messages envelope from a Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 300 tmp_msg_resp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_msg_resp.json'))
+blocks=d.get('content') or []
+u=d.get('usage') or {}
+ok=(d.get('type')=='message' and d.get('stop_reason')=='end_turn'
+    and [b.get('text') for b in blocks if b.get('type')=='text']==['ok']
+    and (u.get('input_tokens'),u.get('output_tokens'))==(7,5))
+sys.exit(0 if ok else 1)
+PY
+python3 - <<'PY' && { echo "PASS: codec folded the system turn into instructions"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_responses.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_responses.json'))['body'] or {}
+sys.exit(0 if b.get('instructions')=='be brief' and 'messages' not in b else 1)
+PY
+
+# 16f-5 messages → responses 流式：response.* 被翻成 Anthropic 事件
+curl -s -N -o tmp_msg_resp_sse.txt -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}'
+grep -q 'event: message_start' tmp_msg_resp_sse.txt \
+  && grep -q 'event: content_block_delta' tmp_msg_resp_sse.txt \
+  && grep -q 'event: message_delta' tmp_msg_resp_sse.txt \
+  && grep -q 'event: message_stop' tmp_msg_resp_sse.txt \
+  && { echo "PASS: responses upstream renders Anthropic typed SSE"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_msg_resp_sse.txt)"; fail=$((fail+1)); }
+grep -q '"stop_reason":"end_turn"' tmp_msg_resp_sse.txt \
+  && grep -q '"output_tokens":5' tmp_msg_resp_sse.txt \
+  && { echo "PASS: responses stream usage reached the Anthropic tail"; pass=$((pass+1)); } || { echo "FAIL: $(tail -c 400 tmp_msg_resp_sse.txt)"; fail=$((fail+1)); }
+
+# 16f-6 chat → responses 工具调用：两个并行调用的参数分片交错，仍要落到稠密的 tool index
+CODE=$(curl -s -o tmp_tool_chatresp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","messages":[{"role":"user","content":"weather?"}],"tools":'"$CHAT_TOOLS"'}')
+check "chat→responses tools 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: chat tool_calls from a Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_tool_chatresp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_tool_chatresp.json'))
+c=d['choices'][0]
+tc=c['message'].get('tool_calls') or []
+ok=(c['finish_reason']=='tool_calls' and len(tc)==2
+    and [t['function']['name'] for t in tc]==['get_weather','get_time']
+    and [t['id'] for t in tc]==['call_mock_a','call_mock_b']
+    and json.loads(tc[0]['function']['arguments'])=={'city':'SF'}
+    and json.loads(tc[1]['function']['arguments'])=={'tz':'UTC'})
+sys.exit(0 if ok else 1)
+PY
+
+# 16f-7 messages → responses 工具调用：function_call 项折回 tool_use 块
+CODE=$(curl -s -o tmp_tool_msgresp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","max_tokens":64,"messages":[{"role":"user","content":"weather?"}],"tools":'"$MSG_TOOLS"'}')
+check "messages→responses tools 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: messages tool_use blocks from a Responses upstream"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_tool_msgresp.json)"; fail=$((fail+1)); }
+import json,sys
+d=json.load(open('tmp_tool_msgresp.json'))
+uses=[b for b in d['content'] if b.get('type')=='tool_use']
+ok=(d['stop_reason']=='tool_use' and len(uses)==2
+    and [u['name'] for u in uses]==['get_weather','get_time']
+    and [u['id'] for u in uses]==['call_mock_a','call_mock_b']
+    and uses[0]['input']=={'city':'SF'} and uses[1]['input']=={'tz':'UTC'})
+sys.exit(0 if ok else 1)
+PY
+
+# 16f-8 Responses 上游的缓存字段：input_tokens_details.cached_tokens → cache_read_input_tokens
+CODE=$(curl -s -o tmp_cache_resp.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5-mock","messages":[{"role":"user","content":"usecache please"}]}')
+check "chat→responses cache 200" 200 "$CODE"
+sleep 1
+CR=$(sqlite3 one-api.db "select cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||usage_source from usage_records order by id desc limit 1;")
+check "responses cached_tokens→reported cache_read=3" "reported|3|reported" "$CR"
+
 # 17. 三种协议入口的成功生成都应落 usage_records
 #     chat(2: 基础 + usecache) + responses 非流式(1) + responses store=true(1)
 #     + responses 流式(1) + messages 非流式(1) + messages 流式(1) = 7
 #     + 直通 messages 非流式(1) + 直通 messages 流式(1) = 9
 #     + 跨协议 responses→anthropic 非流式(1) + 流式(1) = 11
+#     + responses 上游：chat→responses 非流式(1) + 流式(1) + 工具(1)
+#       + messages→responses 非流式(1) + 流式(1) + 工具(1) + 缓存(1) = 18
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 11 ] && { echo "PASS: usage_records 11 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 18 ] && { echo "PASS: usage_records 18 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 11 ] && { echo "PASS: all 11 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 18 ] && { echo "PASS: all 18 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
-#     跨协议格子的两条都上报了缓存，所以计数不变——这同时是"没上报才写 not_reported"的反面证据。
+#     跨协议格子与 responses 上游上报缓存的那条都计入 reported，所以计数不变——这同时是
+#     "没上报才写 not_reported"的反面证据。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 6 ] && { echo "PASS: 6 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
-# 20. §8.1 上报缓存的行 5 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
+[ "$NR" = 12 ] && { echo "PASS: 12 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+# 20. §8.1 上报缓存的行 6 条：1 条 OpenAI details（3）+ 4 条 Anthropic（各 40）
+#     + 1 条 Responses input_tokens_details（3）
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
-[ "$RCC" = 5 ] && { echo "PASS: 5 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 163/207（3+40×4 命中 / 7+50×4 上报输入）；coverage = 5/11
+[ "$RCC" = 6 ] && { echo "PASS: 6 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
+# 21. 管理端聚合三指标：cache_hit_rate = 166/214（3+40×4+3 命中 / 7+50×4+7 上报输入）；coverage = 6/18
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-163/207)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-5/11)<1e-9 and d['cache_read_input_tokens']==163
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==6)
+ok=(abs(d['cache_hit_rate']-166/214)<1e-9 and d['call_hit_rate']==1.0
+    and abs(d['cache_coverage']-6/18)<1e-9 and d['cache_read_input_tokens']==166
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==12)
 sys.exit(0 if ok else 1)
 PY
 
@@ -388,10 +535,8 @@ fi
 
 # 22. 工具调用贯通：三种对外格式都必须把上游的 tool_calls 完整还原
 #     mock 在请求带 tools 时返回两个并行工具调用（参数分片交错），
-#     这正是"模型无法正常调用工具"的复现形态。
-CHAT_TOOLS='[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}},{"type":"function","function":{"name":"get_time","description":"time","parameters":{"type":"object"}}}]'
-RESP_TOOLS='[{"type":"function","name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"type":"function","name":"get_time","description":"time","parameters":{"type":"object"}}]'
-MSG_TOOLS='[{"name":"get_weather","description":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},{"name":"get_time","description":"time","input_schema":{"type":"object"}}]'
+#     这正是"模型无法正常调用工具"的复现形态。（CHAT_TOOLS/RESP_TOOLS/MSG_TOOLS
+#     在 16f 之前定义。）
 
 # 22a. /v1/chat/completions 非流式
 CODE=$(curl -s -o tmp_tool_chat.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/chat/completions \

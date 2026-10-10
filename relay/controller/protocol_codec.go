@@ -10,6 +10,7 @@ import (
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
+	"github.com/songquanpeng/one-api/relay/adaptor/openai_responses"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/sse"
@@ -35,8 +36,10 @@ type upstreamCodec interface {
 	// Protocol is the upstream wire protocol this codec produces and parses.
 	Protocol() upstream.Protocol
 	// RequestBody renders the normalized request in that protocol, and reports
-	// the request path the adaptor must use for it.
-	RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (body io.Reader, requestPath string, err error)
+	// the request path the adaptor must use for it. A request the upstream's
+	// protocol cannot express is refused by name here rather than sent in a
+	// shape the upstream would have to guess at.
+	RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (body io.Reader, requestPath string, bizErr *relaymodel.ErrorWithStatusCode)
 	// NonStreamResponse parses a non-streaming upstream body into the OpenAI
 	// shape the renderers read, including the reported-vs-estimated decision for
 	// its usage.
@@ -85,9 +88,12 @@ func upstreamCodecFor(m *meta.Meta, up upstream.Protocol, entry *protocolEntry) 
 	case upstream.AnthropicMessages:
 		return anthropicChatCodec{}, nil
 	case upstream.OpenAIResponses:
-		return nil, openai.ErrorWrapper(
-			fmt.Errorf("渠道 %d 的上游协议为 openai-responses，其转换器尚未接入", m.ChannelId),
-			"upstream_protocol_not_implemented", http.StatusBadRequest)
+		// The declaration is honoured only where the request can actually travel:
+		// a channel of another adaptor family cannot send a Responses body.
+		if bizErr := responsesUpstreamSupported(m); bizErr != nil {
+			return nil, bizErr
+		}
+		return openaiResponsesCodec{}, nil
 	}
 	return nil, openai.ErrorWrapper(
 		fmt.Errorf("渠道 %d 的上游协议 %s 无法服务 %s 入口", m.ChannelId, up, entry.Name),
@@ -102,10 +108,10 @@ type openaiChatCodec struct{}
 
 func (openaiChatCodec) Protocol() upstream.Protocol { return upstream.OpenAIChat }
 
-func (openaiChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, error) {
+func (openaiChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
 	}
 	// The client protocol's own path is not the upstream's: whatever entry point
 	// the caller used, an OpenAI-compatible upstream is asked for a chat
@@ -176,10 +182,10 @@ type anthropicChatCodec struct{}
 
 func (anthropicChatCodec) Protocol() upstream.Protocol { return upstream.AnthropicMessages }
 
-func (anthropicChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, error) {
+func (anthropicChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
 	body, err := json.Marshal(anthropic.ConvertRequest(*req))
 	if err != nil {
-		return nil, "", err
+		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
 	}
 	return bytes.NewReader(body), "/v1/messages", nil
 }
@@ -316,6 +322,97 @@ func chunkFinishReason(response *openai.ChatCompletionsStreamResponse) string {
 		}
 	}
 	return ""
+}
+
+// --- OpenAI Responses -------------------------------------------------------
+
+// openaiResponsesCodec serves a client speaking one of the other two protocols
+// from an upstream that speaks the Responses API. The same-protocol pair
+// (/v1/responses -> Responses) is the passthrough, not this codec.
+//
+// It holds no conversion of its own: the translation is the sink-free one in
+// relay/adaptor/openai_responses, which the chat entry point drives too, and the
+// stream is read by the reader that file also defines. Whatever the upstream
+// answers, the client-protocol renderers see the normalized chat shapes they
+// already read.
+type openaiResponsesCodec struct{}
+
+func (openaiResponsesCodec) Protocol() upstream.Protocol { return upstream.OpenAIResponses }
+
+func (openaiResponsesCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+	converted, bizErr := openai_responses.ChatToResponsesRequest(req)
+	if bizErr != nil {
+		// A request the Responses API cannot express (a field with no counterpart,
+		// a tool result with no call id) is refused by name instead of being sent
+		// with the field dropped.
+		return nil, "", bizErr
+	}
+	body, err := json.Marshal(converted)
+	if err != nil {
+		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
+	}
+	return bytes.NewReader(body), "/v1/responses", nil
+}
+
+func (openaiResponsesCodec) NonStreamResponse(m *meta.Meta, resp *http.Response) (*openai.TextResponse, *relaymodel.Usage, *relaymodel.ErrorWithStatusCode) {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, openai.ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
+	}
+	_ = resp.Body.Close()
+
+	var upstream openai_responses.Response
+	if err := json.Unmarshal(raw, &upstream); err != nil {
+		return nil, nil, openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError)
+	}
+	// A Responses answer can report a failure with HTTP 200, so the body's own
+	// status is checked before it is read as a success.
+	if e := upstream.Failure(); e != nil {
+		return nil, nil, &relaymodel.ErrorWithStatusCode{Error: *e, StatusCode: http.StatusBadGateway}
+	}
+	// ToChatResponse decides the usage fact itself: the upstream's numbers when it
+	// reported any, a labelled local estimate when it was silent.
+	textResponse, convertErr := openai_responses.ToChatResponse(&upstream, m.ActualModelName, m.PromptTokens)
+	if convertErr != nil {
+		// The upstream's answer carries output this gateway cannot express in a
+		// chat envelope; rendering it anyway would hand the client a truncated
+		// reply, so it is refused with the name of what could not be mapped.
+		return nil, nil, &relaymodel.ErrorWithStatusCode{Error: *convertErr, StatusCode: http.StatusBadGateway}
+	}
+	// The renderers read the usage off the same value the recorder persists, so
+	// the one ToChatResponse normalized is returned by reference.
+	return textResponse, &textResponse.Usage, nil
+}
+
+func (openaiResponsesCodec) Stream(m *meta.Meta, resp *http.Response) upstreamStream {
+	return &responsesUpstreamStream{newResponsesUpstream(resp.Body, m.ActualModelName, m.PromptTokens)}
+}
+
+// responsesUpstreamStream adapts the shared Responses reader to the codec seam.
+// The reader hands back the bytes it already marshalled for the chat sink, so
+// this side only re-reads them in the normalized framing.
+type responsesUpstreamStream struct{ *responsesUpstream }
+
+func (s *responsesUpstreamStream) Next() (sse.Chunk, error) {
+	for {
+		_, raw, err := s.responsesUpstream.next()
+		if err != nil {
+			return sse.Chunk{}, err
+		}
+		chunk, perr := sse.ParseChunk(raw)
+		if perr != nil {
+			// The converter produced these bytes, so a chunk that cannot be re-read
+			// is a bug in this gateway rather than a bad upstream frame: it is logged
+			// and skipped instead of being reported as a stream break.
+			logger.SysError("failed to re-read converted responses chunk: " + perr.Error())
+			continue
+		}
+		return chunk, nil
+	}
+}
+
+func (s *responsesUpstreamStream) Finalize(aborted bool) streamOutcome {
+	return s.responsesUpstream.outcome(aborted)
 }
 
 // chunkFromOpenAIStreamResponse re-reads a converted chunk in the normalized

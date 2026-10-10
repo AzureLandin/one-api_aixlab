@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
+	"github.com/songquanpeng/one-api/relay/adaptor/openai_responses"
+	"github.com/songquanpeng/one-api/relay/apitype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/sse"
@@ -29,9 +31,9 @@ func TestOpenAIChatCodecRequestBodyIsTheNormalizedRequest(t *testing.T) {
 		Messages: []relaymodel.Message{{Role: "user", Content: "hi"}},
 		Stream:   true,
 	}
-	body, path, err := openaiChatCodec{}.RequestBody(&meta.Meta{}, req)
-	if err != nil {
-		t.Fatalf("RequestBody: %v", err)
+	body, path, bizErr := openaiChatCodec{}.RequestBody(&meta.Meta{}, req)
+	if bizErr != nil {
+		t.Fatalf("RequestBody: %v", bizErr)
 	}
 	if path != "/v1/chat/completions" {
 		t.Fatalf("path = %q, want /v1/chat/completions", path)
@@ -62,9 +64,9 @@ func TestAnthropicChatCodecRequestBodyIsTheAdaptorConversion(t *testing.T) {
 			Function: relaymodel.Function{Name: "get_time", Parameters: map[string]any{"type": "object"}},
 		}},
 	}
-	body, path, err := anthropicChatCodec{}.RequestBody(&meta.Meta{}, req)
-	if err != nil {
-		t.Fatalf("RequestBody: %v", err)
+	body, path, bizErr := anthropicChatCodec{}.RequestBody(&meta.Meta{}, req)
+	if bizErr != nil {
+		t.Fatalf("RequestBody: %v", bizErr)
 	}
 	if path != "/v1/messages" {
 		t.Fatalf("path = %q, want /v1/messages", path)
@@ -82,11 +84,18 @@ func TestAnthropicChatCodecRequestBodyIsTheAdaptorConversion(t *testing.T) {
 func TestUpstreamCodecForRefusesBySide(t *testing.T) {
 	entry := &protocolEntry{Name: "/v1/responses", Protocol: upstream.OpenAIResponses}
 
-	// Declared-but-unwired is its own code: A6/A7 will implement it, and until
-	// then the declaration must not be ignored.
-	_, perr := upstreamCodecFor(&meta.Meta{ChannelId: 7}, upstream.OpenAIResponses, entry)
-	if perr == nil || perr.Error.Code != "upstream_protocol_not_implemented" {
-		t.Fatalf("responses upstream: %+v, want upstream_protocol_not_implemented", perr)
+	// The Responses upstream is wired: an OpenAI-family channel gets its codec.
+	codec, perr := upstreamCodecFor(&meta.Meta{ChannelId: 7}, upstream.OpenAIResponses, entry)
+	if perr != nil || codec.Protocol() != upstream.OpenAIResponses {
+		t.Fatalf("responses upstream: codec %v, err %+v; want the responses codec", codec, perr)
+	}
+
+	// A channel of another adaptor family cannot send a Responses request, so the
+	// declaration is refused by name rather than honoured into a URL built for
+	// another protocol.
+	_, perr = upstreamCodecFor(&meta.Meta{ChannelId: 7, APIType: apitype.Anthropic}, upstream.OpenAIResponses, entry)
+	if perr == nil || perr.Error.Code != "upstream_protocol_unsupported" {
+		t.Fatalf("responses upstream on a non-OpenAI channel: %+v, want upstream_protocol_unsupported", perr)
 	}
 
 	// A family with no translator at all is a different answer.
@@ -101,7 +110,7 @@ func TestUpstreamCodecForRefusesBySide(t *testing.T) {
 			t.Fatalf("%s: codec %v, err %+v; want the chat codec", up, codec, perr)
 		}
 	}
-	codec, perr := upstreamCodecFor(&meta.Meta{}, upstream.AnthropicMessages, entry)
+	codec, perr = upstreamCodecFor(&meta.Meta{}, upstream.AnthropicMessages, entry)
 	if perr != nil || codec.Protocol() != upstream.AnthropicMessages {
 		t.Fatalf("anthropic upstream: codec %v, err %+v; want the anthropic codec", codec, perr)
 	}
@@ -492,6 +501,268 @@ func TestAnthropicChatNonStreamReportedZeroStaysReported(t *testing.T) {
 	}
 	if usage.CacheReadInputTokens == nil || *usage.CacheReadInputTokens != 0 {
 		t.Fatalf("cache read = %v, want a reported zero", usage.CacheReadInputTokens)
+	}
+}
+
+// --- the Responses codec ----------------------------------------------------
+
+// responsesSSE is a real Responses stream. The message item holds output_index 0
+// and the two function calls hold 1 and 2, so an implementation that handed the
+// output_index straight to the client would announce OpenAI tool indices 1 and 2
+// instead of the dense 0 and 1 a chat client reads.
+const responsesSSE = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_up","model":"gpt-5-upstream","created_at":1700000000,"status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"he"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_A","name":"alpha","arguments":""}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_2","type":"function_call","call_id":"call_B","name":"beta","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_2","output_index":2,"delta":"{\"b\":2}"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"a\":1}"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"llo"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_up","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]},{"id":"fc_1","type":"function_call","call_id":"call_A","name":"alpha","arguments":"{\"a\":1}","status":"completed"},{"id":"fc_2","type":"function_call","call_id":"call_B","name":"beta","arguments":"{\"b\":2}","status":"completed"}],"usage":{"input_tokens":50,"output_tokens":12,"total_tokens":62,"input_tokens_details":{"cached_tokens":40}}}}
+
+`
+
+func drainResponsesStream(t *testing.T, m *meta.Meta, body string) ([]sse.Chunk, streamOutcome) {
+	t.Helper()
+	stream := openaiResponsesCodec{}.Stream(m, responseWithBody(body))
+	var chunks []sse.Chunk
+	for {
+		chunk, err := stream.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("codec stream: %v", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks, stream.Finalize(false)
+}
+
+// The Responses codec posts the shared converter's body at the Responses path,
+// which is what makes the chat entry point and this codec one implementation.
+func TestOpenAIResponsesCodecRequestBodyIsTheConverterBody(t *testing.T) {
+	req := &relaymodel.GeneralOpenAIRequest{
+		Model:    "gpt-5",
+		Messages: []relaymodel.Message{{Role: "system", Content: "be brief"}, {Role: "user", Content: "hi"}},
+		Tools: []relaymodel.Tool{{
+			Type:     "function",
+			Function: relaymodel.Function{Name: "get_time", Parameters: map[string]any{"type": "object"}},
+		}},
+	}
+	body, path, bizErr := openaiResponsesCodec{}.RequestBody(&meta.Meta{}, req)
+	if bizErr != nil {
+		t.Fatalf("RequestBody: %v", bizErr)
+	}
+	if path != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", path)
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	converted, cerr := openai_responses.ChatToResponsesRequest(req)
+	if cerr != nil {
+		t.Fatalf("converter refused the same request: %v", cerr)
+	}
+	want, _ := json.Marshal(converted)
+	if string(raw) != string(want) {
+		t.Fatalf("body is not the converter's:\n got %s\nwant %s", raw, want)
+	}
+}
+
+// A request the Responses API cannot express is refused by name rather than sent
+// with the field dropped.
+func TestOpenAIResponsesCodecRequestBodyRefusalPropagates(t *testing.T) {
+	// A tool result with no call id cannot become a function_call_output.
+	req := &relaymodel.GeneralOpenAIRequest{
+		Model:    "gpt-5",
+		Messages: []relaymodel.Message{{Role: "user", Content: "hi"}, {Role: "tool", Content: "42"}},
+	}
+	_, _, bizErr := openaiResponsesCodec{}.RequestBody(&meta.Meta{}, req)
+	if bizErr == nil || bizErr.Error.Code != "responses_upstream_missing_tool_call_id" {
+		t.Fatalf("bizErr = %+v, want responses_upstream_missing_tool_call_id", bizErr)
+	}
+}
+
+func TestOpenAIResponsesStreamTranslatesTextAndTools(t *testing.T) {
+	chunks, outcome := drainResponsesStream(t,
+		&meta.Meta{ActualModelName: "gpt-5", PromptTokens: 50}, responsesSSE)
+
+	var text strings.Builder
+	tools := map[int]*sse.ToolDelta{}
+	for _, chunk := range chunks {
+		text.WriteString(chunk.TextDelta())
+		for _, td := range chunk.ToolDeltas() {
+			acc := tools[td.Index]
+			if acc == nil {
+				acc = &sse.ToolDelta{Index: td.Index}
+				tools[td.Index] = acc
+			}
+			if td.ID != "" {
+				acc.ID = td.ID
+			}
+			if td.Name != "" {
+				acc.Name = td.Name
+			}
+			acc.Arguments += td.Arguments
+		}
+	}
+	if text.String() != "hello" {
+		t.Fatalf("text = %q, want %q", text.String(), "hello")
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tool count = %d, want 2 (%+v)", len(tools), tools)
+	}
+	// The message item held output_index 0, so the calls must land on the dense
+	// OpenAI indices 0 and 1 rather than on their own output_index values.
+	first, ok := tools[0]
+	if !ok {
+		t.Fatalf("no tool at the dense index 0: %+v", tools)
+	}
+	if first.ID != "call_A" || first.Name != "alpha" || first.Arguments != `{"a":1}` {
+		t.Fatalf("tool 0 = %+v, want call_A/alpha with its arguments", first)
+	}
+	second, ok := tools[1]
+	if !ok {
+		t.Fatalf("no tool at the dense index 1: %+v", tools)
+	}
+	if second.ID != "call_B" || second.Name != "beta" || second.Arguments != `{"b":2}` {
+		t.Fatalf("tool 1 = %+v, want call_B/beta with its arguments", second)
+	}
+	if outcome.FinishReason != "tool_calls" {
+		t.Fatalf("finish reason = %q, want tool_calls", outcome.FinishReason)
+	}
+	if outcome.Status != relaymodel.UsageStatusSuccess {
+		t.Fatalf("status = %s, want success", outcome.Status)
+	}
+	if outcome.Usage == nil {
+		t.Fatal("usage is nil, want a reported fact")
+	}
+	if outcome.Usage.PromptTokens != 50 || outcome.Usage.CompletionTokens != 12 || outcome.Usage.TotalTokens != 62 {
+		t.Fatalf("usage = %+v, want 50/12/62", outcome.Usage)
+	}
+	if outcome.Usage.Source != relaymodel.UsageSourceReported {
+		t.Fatalf("source = %s, want reported", outcome.Usage.Source)
+	}
+	if outcome.Usage.CacheReadInputTokens == nil || *outcome.Usage.CacheReadInputTokens != 40 {
+		t.Fatalf("cache read = %v, want the reported 40", outcome.Usage.CacheReadInputTokens)
+	}
+}
+
+// A Responses stream has no [DONE] marker, so the terminal decision comes from
+// the converter's own terminal flag: a body that just stops is partial.
+func TestOpenAIResponsesStreamWithoutTerminalIsPartial(t *testing.T) {
+	approximateTokenCounting(t)
+	body := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_up","model":"gpt-5-upstream","status":"in_progress"}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"half"}`,
+		``,
+	}, "\n")
+
+	_, outcome := drainResponsesStream(t, &meta.Meta{ActualModelName: "gpt-5", PromptTokens: 4}, body)
+	if outcome.Status != relaymodel.UsageStatusPartial {
+		t.Fatalf("status = %s, want partial", outcome.Status)
+	}
+}
+
+// The upstream's own failure ends the stream as an error and is carried out for
+// the renderer to surface, not swallowed.
+func TestOpenAIResponsesStreamFailedEventIsError(t *testing.T) {
+	body := strings.Join([]string{
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_up","status":"failed","error":{"code":"server_error","message":"upstream exploded","type":"server_error"}}}`,
+		``,
+	}, "\n")
+
+	_, outcome := drainResponsesStream(t, &meta.Meta{ActualModelName: "gpt-5"}, body)
+	if outcome.Status != relaymodel.UsageStatusError {
+		t.Fatalf("status = %s, want error", outcome.Status)
+	}
+	if outcome.Error == nil || outcome.Error.Message != "upstream exploded" {
+		t.Fatalf("error = %+v, want the upstream's own error", outcome.Error)
+	}
+	if outcome.Usage != nil {
+		t.Fatalf("usage = %+v, want nil: nothing was reported", outcome.Usage)
+	}
+}
+
+func TestOpenAIResponsesNonStreamResponseReportsUsage(t *testing.T) {
+	body := `{"id":"resp_up","object":"response","model":"gpt-5-upstream","status":"completed",
+	  "output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed",
+	    "content":[{"type":"output_text","text":"ok","annotations":[]}]},
+	   {"id":"fc_1","type":"function_call","call_id":"call_A","name":"get_time","arguments":"{\"tz\":\"UTC\"}","status":"completed"}],
+	  "usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15,"input_tokens_details":{"cached_tokens":3}}}`
+
+	m := &meta.Meta{ActualModelName: "gpt-5", PromptTokens: 11}
+	textResponse, usage, perr := openaiResponsesCodec{}.NonStreamResponse(m, responseWithBody(body))
+	if perr != nil {
+		t.Fatalf("NonStreamResponse: %+v", perr)
+	}
+	// The converter prefers the model the upstream reported and falls back to the
+	// mapped name only when the upstream left it out — the same echo-the-upstream
+	// rule the raw chat passthrough leaves in place.
+	if textResponse.Model != "gpt-5-upstream" {
+		t.Fatalf("model = %q, want the upstream's own report", textResponse.Model)
+	}
+	if len(textResponse.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(textResponse.Choices))
+	}
+	choice := textResponse.Choices[0]
+	if choice.FinishReason != "tool_calls" || len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("choice = %+v, want a tool_calls turn with one call", choice)
+	}
+	if usage.Source != relaymodel.UsageSourceReported {
+		t.Fatalf("source = %s, want reported", usage.Source)
+	}
+	if usage.PromptTokens != 11 || usage.CompletionTokens != 4 || usage.TotalTokens != 15 {
+		t.Fatalf("usage = %+v, want 11/4/15", usage)
+	}
+	if usage.CacheReadInputTokens == nil || *usage.CacheReadInputTokens != 3 {
+		t.Fatalf("cache read = %v, want the reported 3", usage.CacheReadInputTokens)
+	}
+	// The renderers read the usage off the same value the recorder persists.
+	if textResponse.Usage.PromptTokens != usage.PromptTokens {
+		t.Fatalf("envelope usage %+v != recorded usage %+v", textResponse.Usage, usage)
+	}
+}
+
+// A Responses answer can report a failure with HTTP 200, so the body's own
+// status is checked before it is read as a success.
+func TestOpenAIResponsesNonStreamFailedBodyIsAnError(t *testing.T) {
+	body := `{"id":"resp_up","object":"response","status":"failed",
+	  "error":{"code":"server_error","message":"upstream exploded","type":"server_error"}}`
+
+	m := &meta.Meta{ActualModelName: "gpt-5"}
+	_, _, perr := openaiResponsesCodec{}.NonStreamResponse(m, responseWithBody(body))
+	if perr == nil {
+		t.Fatal("a failed body must not be read as a success")
+	}
+	if perr.StatusCode != http.StatusBadGateway || perr.Error.Message != "upstream exploded" {
+		t.Fatalf("perr = %+v, want the upstream's failure as a 502", perr)
 	}
 }
 

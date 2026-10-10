@@ -37,6 +37,7 @@ web/build.log
 /scripts/smoke/tmp_*.h
 /scripts/smoke/mock_last_request.json
 /scripts/smoke/mock_last_messages.json
+/scripts/smoke/mock_last_responses.json
 /scripts/smoke/matrix_*.dump
 /scripts/smoke/matrix_*.db
 /scripts/smoke/oneapi_matrix.log
