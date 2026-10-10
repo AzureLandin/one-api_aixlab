@@ -17,11 +17,21 @@ type Content struct {
 	Text   string       `json:"text,omitempty"`
 	Source *ImageSource `json:"source,omitempty"`
 	// tool_calls
-	Id        string `json:"id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Input     any    `json:"input,omitempty"`
-	Content   string `json:"content,omitempty"`
+	Id    string `json:"id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Input any    `json:"input,omitempty"`
+	// Content is `any` rather than string because a hosted tool result's
+	// content is an ARRAY of result objects (or of error objects), not a
+	// string: `web_search_tool_result.content` has no string form. An ordinary
+	// text/tool_result block still marshals a string here, so the wire shape of
+	// every non-hosted block is unchanged.
+	Content   any    `json:"content,omitempty"`
 	ToolUseId string `json:"tool_use_id,omitempty"`
+	// The fields below belong to the hosted MCP blocks (mcp_tool_use carries
+	// the server it dials, mcp_tool_result carries the failure flag). They are
+	// empty on every function tool block, so those keep their wire shape.
+	ServerName string `json:"server_name,omitempty"`
+	IsError    *bool  `json:"is_error,omitempty"`
 }
 
 // ToolChoice is the Anthropic tool_choice object. DisableParallelToolUse is
@@ -55,6 +65,16 @@ type Tool struct {
 	// Strict asks Anthropic to validate the generated arguments against the
 	// schema instead of treating it as a best-effort hint.
 	Strict *bool `json:"strict,omitempty"`
+	// Type is the hosted-tool type ("web_search_20250305"). It is empty for an
+	// ordinary function tool, and `omitempty` keeps that tool's wire shape
+	// byte-identical to what it was before hosted tools existed.
+	Type string `json:"type,omitempty"`
+	// MaxUses, AllowedDomains, BlockedDomains and UserLocation are the hosted
+	// web-search knobs. They are only ever set alongside Type.
+	MaxUses        *int     `json:"max_uses,omitempty"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
+	UserLocation   any      `json:"user_location,omitempty"`
 }
 
 type Request struct {

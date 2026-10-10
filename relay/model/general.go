@@ -1,5 +1,7 @@
 package model
 
+import "encoding/json"
+
 type ResponseFormat struct {
 	Type       string      `json:"type,omitempty"`
 	JsonSchema *JSONSchema `json:"json_schema,omitempty"`
@@ -19,6 +21,15 @@ type Audio struct {
 
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// WebSearchOptions is the Chat Completions hosted-web-search toggle. Only the
+// two sub-fields every chat upstream understands are modelled; the
+// Claude-only knobs (max_uses, domain filters) are reported as losses at the
+// point they are dropped rather than smuggled in here.
+type WebSearchOptions struct {
+	SearchContextSize string          `json:"search_context_size,omitempty"`
+	UserLocation      json.RawMessage `json:"user_location,omitempty"`
 }
 
 type GeneralOpenAIRequest struct {
@@ -50,10 +61,17 @@ type GeneralOpenAIRequest struct {
 	TopK                int             `json:"top_k,omitempty"`
 	Tools               []Tool          `json:"tools,omitempty"`
 	ToolChoice          any             `json:"tool_choice,omitempty"`
-	ParallelTooCalls    *bool           `json:"parallel_tool_calls,omitempty"`
-	User                string          `json:"user,omitempty"`
-	FunctionCall        any             `json:"function_call,omitempty"`
-	Functions           any             `json:"functions,omitempty"`
+	// WebSearchOptions is Chat Completions' hosted-web-search toggle. A chat
+	// client's own value round-trips through json.Marshal untouched; the field
+	// is also where a hosted web_search declaration that arrived on a client
+	// protocol with no chat equivalent (Claude's web_search_20250305, Responses'
+	// {"type":"web_search"}) is carried to a chat upstream. Chat has no hosted
+	// ARTIFACT vocabulary, so this is the whole of what that direction can say.
+	WebSearchOptions *WebSearchOptions `json:"web_search_options,omitempty"`
+	ParallelTooCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	User             string            `json:"user,omitempty"`
+	FunctionCall     any               `json:"function_call,omitempty"`
+	Functions        any               `json:"functions,omitempty"`
 	// https://platform.openai.com/docs/api-reference/embeddings/create
 	Input          any    `json:"input,omitempty"`
 	EncodingFormat string `json:"encoding_format,omitempty"`
@@ -66,6 +84,12 @@ type GeneralOpenAIRequest struct {
 	// Others
 	Instruction string `json:"instruction,omitempty"`
 	NumCtx      int    `json:"num_ctx,omitempty"`
+
+	// Hosted carries the hosted-tool declarations, replayed history and the
+	// forced tool choice that no OpenAI field can hold, in the neutral form the
+	// upstream codec translates from. It is `json:"-"`: it must never reach an
+	// upstream body, and it is read by the codec's RequestBody, not by the wire.
+	Hosted *HostedSet `json:"-"`
 }
 
 func (r GeneralOpenAIRequest) ParseInput() []string {

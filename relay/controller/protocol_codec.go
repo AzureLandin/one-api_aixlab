@@ -108,7 +108,12 @@ type openaiChatCodec struct{}
 
 func (openaiChatCodec) Protocol() upstream.Protocol { return upstream.OpenAIChat }
 
-func (openaiChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+func (openaiChatCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+	// A chat body is this struct marshalled, so this is the only place a hosted
+	// declaration can be folded in for a chat upstream.
+	attachChat(req)
+	logHostedLosses(m.ChannelId, req.Hosted)
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
@@ -182,8 +187,13 @@ type anthropicChatCodec struct{}
 
 func (anthropicChatCodec) Protocol() upstream.Protocol { return upstream.AnthropicMessages }
 
-func (anthropicChatCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
-	body, err := json.Marshal(anthropic.ConvertRequest(*req))
+func (anthropicChatCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+	// As with the Responses codec, the converter owns the hosted fold-in: it is
+	// what knows where a message boundary lands in Anthropic's message list.
+	converted := anthropic.ConvertRequest(*req)
+	logHostedLosses(m.ChannelId, req.Hosted)
+
+	body, err := json.Marshal(converted)
 	if err != nil {
 		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)
 	}
@@ -339,7 +349,10 @@ type openaiResponsesCodec struct{}
 
 func (openaiResponsesCodec) Protocol() upstream.Protocol { return upstream.OpenAIResponses }
 
-func (openaiResponsesCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+func (openaiResponsesCodec) RequestBody(m *meta.Meta, req *relaymodel.GeneralOpenAIRequest) (io.Reader, string, *relaymodel.ErrorWithStatusCode) {
+	// The converter reads req.Hosted itself: only it knows where a message
+	// boundary lands in the Responses input array, which is where a replayed
+	// hosted turn has to be spliced back in.
 	converted, bizErr := openai_responses.ChatToResponsesRequest(req)
 	if bizErr != nil {
 		// A request the Responses API cannot express (a field with no counterpart,
@@ -347,6 +360,7 @@ func (openaiResponsesCodec) RequestBody(_ *meta.Meta, req *relaymodel.GeneralOpe
 		// with the field dropped.
 		return nil, "", bizErr
 	}
+	logHostedLosses(m.ChannelId, req.Hosted)
 	body, err := json.Marshal(converted)
 	if err != nil {
 		return nil, "", openai.ErrorWrapper(err, "marshal_normalized_request_failed", http.StatusInternalServerError)

@@ -57,6 +57,15 @@ type InputItem struct {
 	Arguments string `json:"arguments,omitempty"`
 	// Output is the tool result, either a string or structured content.
 	Output any `json:"output,omitempty"`
+	// The fields below are set only on a hosted item (web_search_call,
+	// mcp_call). They are what makes a replayed hosted turn survive the
+	// translation: `id` pairs a call with what it produced, `action` is the
+	// search that was run, and `server_label`/`error` are MCP's.
+	ID          string          `json:"id,omitempty"`
+	Status      string          `json:"status,omitempty"`
+	Action      json.RawMessage `json:"action,omitempty"`
+	ServerLabel string          `json:"server_label,omitempty"`
+	Error       any             `json:"error,omitempty"`
 }
 
 // ContentPart is one entry of a message item's content array.
@@ -126,7 +135,7 @@ func ChatToResponsesRequest(req *relaymodel.GeneralOpenAIRequest) (*Request, *re
 		return nil, bizErr
 	}
 
-	input, instructions, bizErr := buildInput(req.Messages)
+	input, instructions, bizErr := buildInput(req.Messages, req.Hosted)
 	if bizErr != nil {
 		return nil, bizErr
 	}
@@ -169,7 +178,40 @@ func ChatToResponsesRequest(req *relaymodel.GeneralOpenAIRequest) (*Request, *re
 	}
 	out.ToolChoice = choice
 
+	attachHostedTools(out, req.Hosted)
+
 	return out, nil
+}
+
+// attachHostedTools declares on the Responses body the hosted tools the client
+// asked for, and records what Responses cannot express.
+//
+// The declaration type is always the canonical "web_search": this converter is
+// only ever reached from a client that speaks another protocol (a Responses
+// client talking to a Responses upstream is the passthrough and never gets
+// here), so there is no native Responses spelling to preserve.
+func attachHostedTools(out *Request, set *relaymodel.HostedSet) {
+	if set == nil {
+		return
+	}
+	for _, def := range set.Definitions {
+		switch relaymodel.HostedResponsesDeclarationType(def.Kind) {
+		case "":
+			set.AddLoss(relaymodel.UnsupportedHostedLoss("OpenAI Responses", def))
+		default:
+			out.Tools = append(out.Tools, ToolDef{Type: relaymodel.HostedResponsesDeclarationType(def.Kind)})
+		}
+	}
+	if set.ForcedChoice == nil {
+		return
+	}
+	if t := relaymodel.HostedResponsesDeclarationType(set.ForcedChoice.Kind); t != "" {
+		out.ToolChoice = map[string]any{"type": t}
+		return
+	}
+	set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagForcedChoiceDowngraded, set.ForcedChoice.Path,
+		"OpenAI Responses 无法强制使用托管工具 %s，已降级为自动选择",
+		relaymodel.DescribeHosted(*set.ForcedChoice)))
 }
 
 // checkUntranslatableFields refuses the chat fields this translation cannot
@@ -209,11 +251,37 @@ func checkUntranslatableFields(req *relaymodel.GeneralOpenAIRequest) *relaymodel
 
 // buildInput splits the chat message list into Responses input items plus the
 // instructions that system/developer turns become.
-func buildInput(messages []relaymodel.Message) ([]InputItem, string, *relaymodel.ErrorWithStatusCode) {
+//
+// A replayed hosted turn is spliced back in at the boundary it fell on: the
+// Responses `input` array is the transcript, so a web_search_call belongs
+// between the two messages it sat between, not appended at the end where the
+// model would read the search as having happened after the question that
+// followed it.
+func buildInput(messages []relaymodel.Message, set *relaymodel.HostedSet) ([]InputItem, string, *relaymodel.ErrorWithStatusCode) {
 	items := make([]InputItem, 0, len(messages))
 	var instructions []string
 
+	nextHistory := 0
+	replayHistory := func(before int) {
+		for set != nil && nextHistory < len(set.History) && set.History[nextHistory].BeforeMessage <= before {
+			h := set.History[nextHistory]
+			nextHistory++
+			item, resultsLost := responsesHistoryItem(h)
+			if item == nil {
+				set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagUnsupportedHostedHistory, "input",
+					"OpenAI Responses 无法回放托管工具历史（类型 %s）", h.NativeType))
+				continue
+			}
+			items = append(items, *item)
+			if resultsLost {
+				set.AddLoss(relaymodel.NewHostedLoss(relaymodel.DiagSearchContinuationLost, "input",
+					"托管搜索结果无法回放进 Responses 的 web_search_call（该 item 只带搜索动作，没有结果位）"))
+			}
+		}
+	}
+
 	for i, msg := range messages {
+		replayHistory(i)
 		role := strings.TrimSpace(msg.Role)
 		if role == "" {
 			return nil, "", unsupportedField("messages[%d] 缺少 role", i)
@@ -259,8 +327,42 @@ func buildInput(messages []relaymodel.Message) ([]InputItem, string, *relaymodel
 			items = append(items, calls...)
 		}
 	}
+	// A hosted turn that trailed the whole transcript has no following message
+	// to sit before, so it lands at the end.
+	replayHistory(len(messages))
 
 	return items, strings.Join(instructions, "\n\n"), nil
+}
+
+// responsesHistoryItem renders one replayed hosted turn as a Responses input
+// item. It reports whether the turn's search results had to be left behind:
+// a Responses web_search_call carries the search that was run, not its
+// results, so a Claude-sourced turn loses them.
+func responsesHistoryItem(h relaymodel.HostedHistoryItem) (*InputItem, bool) {
+	switch h.Kind {
+	case relaymodel.HostedWebSearch:
+		return &InputItem{
+			Type:   "web_search_call",
+			ID:     h.ID,
+			Status: h.Status,
+			Action: h.Action,
+		}, len(h.Results) > 0
+	case relaymodel.HostedMCP:
+		item := &InputItem{
+			Type:        "mcp_call",
+			ID:          h.ID,
+			ServerLabel: h.ServerLabel,
+			Name:        h.Name,
+			Output:      relaymodel.RawToValue(h.Output),
+			Error:       relaymodel.RawToValue(h.Error),
+		}
+		if len(h.Arguments) > 0 {
+			item.Arguments = string(h.Arguments)
+		}
+		return item, false
+	default:
+		return nil, false
+	}
 }
 
 // messageText flattens a message's text for the instructions field.

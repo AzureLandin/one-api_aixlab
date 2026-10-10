@@ -93,10 +93,25 @@ type HostedHistoryItem struct {
 	Name        string
 	ServerLabel string
 	Status      string
-	Action      json.RawMessage
-	Results     json.RawMessage
-	Raw         json.RawMessage
-	Sequence    int // arrival order, so a renderer can interleave faithfully
+	// Action is the search that was run, in the Responses shape
+	// ({"type":"search","query":…}). Both parsers normalize to it, because it
+	// is the richer of the two and Claude's server_tool_use input is a strict
+	// subset of it.
+	Action    json.RawMessage
+	Results   json.RawMessage
+	Arguments json.RawMessage // MCP call arguments
+	Output    json.RawMessage // MCP call output
+	Error     json.RawMessage // MCP call error, when the call failed
+	Raw       json.RawMessage
+	Sequence  int // arrival order, so a renderer can interleave faithfully
+	// BeforeMessage is the index into the normalized Messages this item
+	// preceded in the client's transcript (len(Messages) means "it came last").
+	// A hosted turn sits between two messages in every protocol — Claude puts
+	// the `server_tool_use` and its result inside the assistant message that
+	// follows, Responses puts a `web_search_call` item between two message
+	// items — so a target that has to rebuild the transcript can only place it
+	// faithfully if it knows the boundary it fell on.
+	BeforeMessage int
 }
 
 // HostedSet is everything hosted a parsed request carried, in neutral form.
@@ -106,6 +121,15 @@ type HostedSet struct {
 	Definitions  []HostedDefinition
 	History      []HostedHistoryItem
 	ForcedChoice *HostedDefinition
+
+	// Losses accumulates what the translation could not carry, for the caller
+	// to log and to weigh against the channel's policy. It is an OUTPUT, not
+	// part of what the client sent: the converters that build an upstream body
+	// append to it as they walk, and the caller reads it once they return. It
+	// lives here because the converters are pure functions whose signatures
+	// already carry the request, and a second return value would churn every
+	// caller for a side channel only the relay reads.
+	Losses []ConversionDiagnostic
 }
 
 // Empty reports whether there is nothing hosted to translate. A nil set is
@@ -113,6 +137,22 @@ type HostedSet struct {
 func (s *HostedSet) Empty() bool {
 	return s == nil ||
 		(len(s.Definitions) == 0 && len(s.History) == 0 && s.ForcedChoice == nil)
+}
+
+// AddLoss records one thing the translation could not carry. A nil set is a
+// no-op, so converters can call it unconditionally.
+func (s *HostedSet) AddLoss(d ConversionDiagnostic) {
+	if s != nil {
+		s.Losses = append(s.Losses, d)
+	}
+}
+
+// LossOf returns the losses recorded so far, tolerating a nil set.
+func (s *HostedSet) LossOf() []ConversionDiagnostic {
+	if s == nil {
+		return nil
+	}
+	return s.Losses
 }
 
 // HostedStatus is the Responses status vocabulary, reused as the neutral one.
@@ -231,6 +271,32 @@ func HostedResponsesItemType(k HostedKind) string {
 	}
 }
 
+// HostedResponsesDeclarationType is the Responses TOOL DECLARATION type for a
+// kind. It is not the same string as the output item type above: a client
+// declares "web_search" and the upstream answers with a "web_search_call".
+func HostedResponsesDeclarationType(k HostedKind) string {
+	switch k {
+	case HostedWebSearch:
+		return "web_search"
+	default:
+		return ""
+	}
+}
+
+// RawToValue decodes a raw JSON fragment into the untyped form an upstream
+// body's `any` field wants. An empty or malformed fragment is nil, which the
+// callers' omitempty tags then leave out of the body entirely.
+func RawToValue(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
 // HostedClaudeDeclarationType is the Claude TOOL declaration type for a kind.
 func HostedClaudeDeclarationType(k HostedKind) string {
 	switch k {
@@ -310,6 +376,22 @@ func NewHostedLoss(code, path, format string, args ...any) ConversionDiagnostic 
 		Message:  fmt.Sprintf(format, args...),
 		Severity: DiagnosticError,
 	}
+}
+
+// DescribeHosted names a definition the way a diagnostic should: by its name
+// when it has one, and always by the type the client actually wrote.
+func DescribeHosted(def HostedDefinition) string {
+	if def.Name != "" {
+		return fmt.Sprintf("%q（类型 %s）", def.Name, def.NativeType)
+	}
+	return fmt.Sprintf("%q", def.NativeType)
+}
+
+// UnsupportedHostedLoss records that a target protocol cannot express def.
+// Shared by the three attach sites so a drop reads the same wherever it happens.
+func UnsupportedHostedLoss(target string, def HostedDefinition) ConversionDiagnostic {
+	return NewHostedLoss(DiagUnsupportedHostedTool, def.Path,
+		"%s 无法表达托管工具 %s", target, DescribeHosted(def))
 }
 
 // RejectLoss decides whether the diagnostics collected while translating a

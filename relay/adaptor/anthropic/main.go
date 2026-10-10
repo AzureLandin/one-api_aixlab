@@ -66,6 +66,13 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 		})
 	}
 
+	// Hosted declarations share the tools array with function tools; Anthropic
+	// tells them apart by `type`. A kind Anthropic cannot declare is recorded
+	// rather than dropped in silence.
+	for _, tool := range hostedClaudeTools(textRequest.Hosted) {
+		claudeTools = append(claudeTools, tool)
+	}
+
 	claudeRequest := Request{
 		Model:       textRequest.Model,
 		MaxTokens:   textRequest.MaxTokens,
@@ -90,7 +97,36 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 	} else if claudeRequest.Model == "claude-2" {
 		claudeRequest.Model = "claude-2.1"
 	}
-	for _, message := range textRequest.Messages {
+	// A replayed hosted turn goes back in at the boundary it fell on, in
+	// arrival order. Anthropic puts the call and its result inside the
+	// assistant turn that follows, so an inserted assistant message is merged
+	// into its neighbour by mergeAdjacentClaudeMessages below.
+	nextHosted := 0
+	replayHosted := func(before int) {
+		set := textRequest.Hosted
+		for set != nil && nextHosted < len(set.History) && set.History[nextHosted].BeforeMessage <= before {
+			h := set.History[nextHosted]
+			nextHosted++
+			blocks := hostedHistoryBlocks(h)
+			if len(blocks) == 0 {
+				set.AddLoss(model.NewHostedLoss(model.DiagUnsupportedHostedHistory, "messages",
+					"Anthropic Messages 无法回放托管工具历史（类型 %s）", h.NativeType))
+				continue
+			}
+			if h.Kind == model.HostedWebSearch && len(h.Results) == 0 {
+				// The source carried the call but not its results (a Responses
+				// web_search_call has no results slot), and Anthropic rejects a
+				// server_tool_use with no matching result. The API's own
+				// "unavailable" error result is the honest stand-in.
+				set.AddLoss(model.NewHostedLoss(model.DiagSearchContinuationLost, "messages",
+					"托管搜索结果缺失，已用 web_search_tool_result_error(unavailable) 占位"))
+			}
+			claudeRequest.Messages = append(claudeRequest.Messages, Message{Role: "assistant", Content: blocks})
+		}
+	}
+
+	for i, message := range textRequest.Messages {
+		replayHosted(i)
 		if message.Role == "system" {
 			// Anthropic carries one top-level system string; later system
 			// messages are folded in rather than emitted as role:"system"
@@ -174,8 +210,86 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 		}
 		claudeRequest.Messages = append(claudeRequest.Messages, claudeMessage)
 	}
+	replayHosted(len(textRequest.Messages))
 	claudeRequest.Messages = mergeAdjacentClaudeMessages(claudeRequest.Messages)
 	return &claudeRequest
+}
+
+// hostedClaudeTools renders the hosted declarations a client asked for as
+// Anthropic tool definitions, recording the kinds Anthropic cannot declare.
+// No protocol's MCP *declaration* form is mapped — the reference
+// implementation drops those too — so only web search is emitted here.
+func hostedClaudeTools(set *model.HostedSet) []Tool {
+	if set == nil {
+		return nil
+	}
+	var out []Tool
+	for _, def := range set.Definitions {
+		t := model.HostedClaudeDeclarationType(def.Kind)
+		if t == "" {
+			set.AddLoss(model.UnsupportedHostedLoss("Anthropic Messages", def))
+			continue
+		}
+		tool := Tool{Type: t, Name: model.HostedClaudeBlockName(def.Kind)}
+		if def.WebSearch != nil {
+			tool.MaxUses = def.WebSearch.MaxUses
+			tool.AllowedDomains = def.WebSearch.AllowedDomains
+			tool.BlockedDomains = def.WebSearch.BlockedDomains
+			tool.UserLocation = model.RawToValue(def.WebSearch.UserLocation)
+		}
+		out = append(out, tool)
+	}
+	if set.ForcedChoice != nil {
+		if t := model.HostedClaudeDeclarationType(set.ForcedChoice.Kind); t != "" {
+			out = append(out, Tool{Type: t, Name: model.HostedClaudeBlockName(set.ForcedChoice.Kind)})
+		} else {
+			set.AddLoss(model.NewHostedLoss(model.DiagForcedChoiceDowngraded, set.ForcedChoice.Path,
+				"Anthropic Messages 无法强制使用托管工具 %s，已降级为自动选择",
+				model.DescribeHosted(*set.ForcedChoice)))
+		}
+	}
+	return out
+}
+
+// hostedHistoryBlocks renders one replayed hosted turn as Anthropic content
+// blocks: the server_tool_use that ran it and the result block that answers it.
+func hostedHistoryBlocks(h model.HostedHistoryItem) []Content {
+	switch h.Kind {
+	case model.HostedWebSearch:
+		result := model.RawToValue(h.Results)
+		if result == nil {
+			result = []any{map[string]any{
+				"type":       "web_search_tool_result_error",
+				"error_code": "unavailable",
+			}}
+		}
+		return []Content{
+			{Type: "server_tool_use", Id: h.ID, Name: "web_search", Input: claudeWebSearchInput(h.Action)},
+			{Type: "web_search_tool_result", ToolUseId: h.ID, Content: result},
+		}
+	case model.HostedMCP:
+		return []Content{
+			{Type: "mcp_tool_use", Id: h.ID, Name: h.Name, ServerName: h.ServerLabel,
+				Input: model.RawToValue(h.Arguments)},
+			{Type: "mcp_tool_result", ToolUseId: h.ID, Content: model.RawToValue(h.Output)},
+		}
+	default:
+		return nil
+	}
+}
+
+// claudeWebSearchInput narrows a Responses search action back to the input
+// object Claude's server_tool_use carries. The action is the richer of the two
+// shapes ("{type,query}"); Claude's input is "{query}", and an extra key there
+// is not something the upstream is documented to ignore.
+func claudeWebSearchInput(action json.RawMessage) any {
+	var m map[string]any
+	if err := json.Unmarshal(action, &m); err == nil {
+		if q, ok := m["query"]; ok {
+			return map[string]any{"query": q}
+		}
+	}
+	return model.RawToValue(action)
 }
 
 // stopSequencesOf reads the OpenAI `stop` field, which the spec allows to be
