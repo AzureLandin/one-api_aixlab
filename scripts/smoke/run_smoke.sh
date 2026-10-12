@@ -873,6 +873,24 @@ grep -q '"type":"custom_tool_call"' tmp_j_custom_sse.txt \
   && { echo "PASS: the streamed item is a custom_tool_call, not a function_call"; pass=$((pass+1)); } \
   || { echo "FAIL: $(tail -c 300 tmp_j_custom_sse.txt)"; fail=$((fail+1)); }
 
+# 16k. /v1/messages 的 role 直通：Anthropic 自己的 API 只允许 user/assistant，但网关不是
+#      Anthropic——chat 上游接受更多角色，另两个转换器也各自把 system 折进自己唯一的那个槽位
+#      （anthropic/main.go 折进顶层 system，openai_responses/request.go 折进 instructions）。
+#      所以 role 原样透传。这一格是因为线上真的有客户端在 messages 里带 system 被打回才补的：
+#      拒绝它就等于拒绝了每个下游都已经准备好服务的请求。
+CODE=$(curl -s -o tmp_k_role.json -w '%{http_code}' -X POST http://127.0.0.1:13000/v1/messages \
+  -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-3.5-turbo","max_tokens":64,"messages":[{"role":"system","content":"be terse"},{"role":"user","content":"hi"}]}')
+check "messages with a system turn 200" 200 "$CODE"
+python3 - <<'PY' && { echo "PASS: the role reached the upstream as the client wrote it"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 mock_last_request.json)"; fail=$((fail+1)); }
+import json,sys
+b=json.load(open('mock_last_request.json'))
+msgs=b.get('messages') or []
+ok=(len(msgs)==2 and msgs[0].get('role')=='system' and msgs[0].get('content')=='be terse'
+    and msgs[1].get('role')=='user')
+sys.exit(0 if ok else 1)
+PY
+
 # 16i. hosted tools（上游自己执行的工具）流式桥接（B2）。
 #      跨协议流式桥接发生在 messages 与 responses 之间：
 #      - responses 客户端 ← anthropic-messages 上游（claudeHostedBridge）：
@@ -938,22 +956,22 @@ log_since "$OFF" | grep -q 'code=web_search_response_unrepresentable' \
 #     + 直通 responses 非流式(1) + 流式(1) + 工具流式(1) + 缓存(1) = 22
 #     + 16h 的 8 格（16h-1..6、16h-8、16h-9）+ 16i 的 2 格（16i-1、16i-2）= 32；
 #       16h-7 在 safe 策略下被具名 400，codec 层 4xx 不写用量行，所以它是计数中性的。
-#     + 16j 的 2 格（custom 工具降级，非流式 + 流式）= 34。
-#       这个精确的 34 就是那条证据：拒绝的请求若偷偷落了一行，下面这个等号会变成 35。
+#     + 16j 的 2 格（custom 工具降级，非流式 + 流式）+ 16k 的 1 格（messages 的 role 直通）= 35。
+#       这个精确的 35 就是那条证据：拒绝的请求若偷偷落了一行，下面这个等号会变成 36。
 sleep 1
 SUC=$(sqlite3 one-api.db "select count(*) from usage_records where status='success';")
-[ "$SUC" = 34 ] && { echo "PASS: usage_records 34 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
+[ "$SUC" = 35 ] && { echo "PASS: usage_records 35 success rows"; pass=$((pass+1)); } || { echo "FAIL: success rows=$SUC"; fail=$((fail+1)); }
 
 # 18. 所有 success 行都以 reported 收尾（mock 发了 usage/usage 尾块），绝不为零命中伪造
 REP=$(sqlite3 one-api.db "select count(*) from usage_records where status='success' and usage_source='reported';")
-[ "$REP" = 34 ] && { echo "PASS: all 34 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
+[ "$REP" = 35 ] && { echo "PASS: all 35 success rows reported"; pass=$((pass+1)); } || { echo "FAIL: reported rows=$REP"; fail=$((fail+1)); }
 # 19. 上游未报缓存的行 cache_usage_status=not_reported（非 invalid、非伪造命中）
 #     跨协议格子与 responses 上游上报缓存的那条都计入 reported，所以计数不变——这同时是
 #     "没上报才写 not_reported"的反面证据。16h 有 7 格走不报缓存的上游（chat 的 4 格、
 #     responses 的 2 格 + 那一格流式），加上 16i-2（Responses 上游未带 usecache），
-#     再加上 16j 那 2 格（仍走 chat 上游、不带 usecache），15+7+1+2=25。
+#     再加上 16j 那 2 格与 16k 那 1 格（都走 chat 上游、不带 usecache），15+7+1+2+1=26。
 NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='not_reported';")
-[ "$NR" = 25 ] && { echo "PASS: 25 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
+[ "$NR" = 26 ] && { echo "PASS: 26 not_reported rows (upstream silent)"; pass=$((pass+1)); } || { echo "FAIL: not_reported rows=$NR"; fail=$((fail+1)); }
 # 20. §8.1 上报缓存的行 9 条：1 条 OpenAI details（3）+ 6 条 Anthropic（各 40）
 #     + 2 条 Responses input_tokens_details（各 3：翻译路径 1 条 + 直通 1 条）
 #     16h-6（responses→anthropic 非流式）与 16i-1（responses→anthropic 流式）
@@ -961,16 +979,16 @@ NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_st
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
 [ "$RCC" = 9 ] && { echo "PASS: 9 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
 # 21. 管理端聚合三指标：cache_hit_rate = 249/321（209+40 命中 / 271+50 上报输入）；
-#     coverage = 9/34。分母只由上报缓存的行构成，16i-1 抬高分子与分母，16i-2 与 16j 的
-#     两格只进 not_reported_cache_calls。
+#     coverage = 9/35。分母只由上报缓存的行构成，16i-1 抬高分子与分母，16i-2、16j、16k
+#     那几格只进 not_reported_cache_calls。
 #     缓存写入仍是 0：没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"。
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
 ok=(abs(d['cache_hit_rate']-249/321)<1e-9 and d['call_hit_rate']==1.0
-    and abs(d['cache_coverage']-9/34)<1e-9 and d['cache_read_input_tokens']==249
-    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==25)
+    and abs(d['cache_coverage']-9/35)<1e-9 and d['cache_read_input_tokens']==249
+    and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==26)
 sys.exit(0 if ok else 1)
 PY
 

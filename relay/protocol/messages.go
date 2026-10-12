@@ -129,12 +129,15 @@ func decodeMessagesSystem(raw json.RawMessage) (string, *ProtocolError) {
 // is a string or a block array) into one or more normalized OpenAI messages.
 // A tool_result block becomes a standalone role:"tool" message; assistant
 // tool_use blocks are merged into a single assistant message carrying tool_calls.
+//
+// The role is passed through as the client wrote it, with no check against
+// user/assistant. Anthropic's own API allows only those two, but the gateway is
+// not Anthropic: a chat upstream accepts any role, and both other converters
+// already fold a system turn into their single system slot
+// (relay/adaptor/anthropic/main.go, relay/adaptor/openai_responses/request.go).
+// Rejecting it here refused requests every downstream was built to serve — and
+// the reference implementation passes the role straight through as well.
 func messagesInboundToOpenAI(i int, role string, contentRaw json.RawMessage) ([]relaymodel.Message, []relaymodel.HostedHistoryItem, *ProtocolError) {
-	if role != "user" && role != "assistant" {
-		return nil, nil, invalidField("messages["+itoa(i)+"].role",
-			"messages role 只能是 user/assistant，收到：%s", role)
-	}
-
 	// bare string content
 	if s, ok := decodeString(contentRaw); ok {
 		return []relaymodel.Message{{Role: role, Content: s}}, nil, nil

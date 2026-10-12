@@ -108,12 +108,34 @@ func TestParseMessages_ToolsAndToolChoice(t *testing.T) {
 	}
 }
 
+// The role travels to the upstream as the client wrote it. Anthropic's own API
+// allows only user/assistant here, but the gateway is not Anthropic: a chat
+// upstream accepts more, and both other converters fold a system turn into their
+// single system slot. Refusing it here only refused requests every downstream was
+// built to serve — it was a named 400 until a client hit it in production.
+func TestParseMessages_PassesSystemRoleThrough(t *testing.T) {
+	req, perr := ParseMessages([]byte(`{"model":"claude","max_tokens":10,"messages":[
+		{"role":"system","content":"be terse"},
+		{"role":"user","content":"hi"}]}`))
+	if perr != nil {
+		t.Fatalf("a system turn must not be refused: %+v", perr)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+	if req.Messages[0].Role != "system" || req.Messages[0].StringContent() != "be terse" {
+		t.Fatalf("the system turn must survive verbatim: %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+}
+
 func TestParseMessages_RejectsInvalid(t *testing.T) {
 	cases := map[string]string{
 		"missing_max_tokens": `{"model":"claude","messages":[{"role":"user","content":"hi"}]}`,
 		"zero_max_tokens":    `{"model":"claude","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`,
 		"missing_messages":   `{"model":"claude","max_tokens":10}`,
-		"bad_role":           `{"model":"claude","max_tokens":10,"messages":[{"role":"system","content":"hi"}]}`,
 		"unknown_block":      `{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":[{"type":"document"}]}]}`,
 		"tool_use_in_user":   `{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_use","name":"f"}]}]}`,
 		"missing_model":      `{"max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`,
