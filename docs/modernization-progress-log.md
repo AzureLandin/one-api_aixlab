@@ -282,11 +282,11 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 
 ## §13 终局验收清单
 
-逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(151/0，阶段 10 口径)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
+逐项对照实施文档 §13。**证据键**：单测=Go 单元测试；冒烟=`scripts/smoke/run_smoke.sh`(153/0，阶段 11 口径)；迁移矩阵=`scripts/smoke/migration_matrix.sh`(真实二进制启动路径)；迁移集成=`model/migration/integration_test.go`。
 
 - [x] 新请求路径没有额度预扣/扣除/退款/额度不足判断 — 阶段 2（`relay/billing/billing.go` 删除、预扣/退款/不足拒绝全部移除）；冒烟 “relay 200 with zero quota”、“user/token/channel 旧列 untouched”。
 - [x] 新请求路径没有模型/分组倍率计费 — 阶段 2（`billingratio` 仅保留名称枚举用途，不参与计费）。
-- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 34 条 success 行、全部 `usage_source=reported`、`cache_usage_status` 计数 **9 reported / 25 not_reported**（9+25=34；阶段 10 口径；直通与跨协议格子各自走自己的收尾阶梯）。34 = 阶段 8 的 22 + 16h 的 8 格（16h-1..6、16h-8、16h-9）+ 16i 的 2 格（16i-1、16i-2）+ 16j 的 2 格（custom 工具，非流式 + 流式）；16h-7 是 `safe` 策略下的具名 400，codec 层 4xx 不写用量行，因此对计数中性——这个精确的等号就是"被拒绝的请求没有偷偷落一行"的证据。
+- [x] 所有成功生成请求都有 usage 收尾路径 — 阶段 3/4（recorder 落 `usage_records`）；冒烟 35 条 success 行、全部 `usage_source=reported`、`cache_usage_status` 计数 **9 reported / 26 not_reported**（9+26=35；阶段 11 口径；直通与跨协议格子各自走自己的收尾阶梯）。35 = 阶段 8 的 22 + 16h 的 8 格（16h-1..6、16h-8、16h-9）+ 16i 的 2 格（16i-1、16i-2）+ 16j 的 2 格（custom 工具，非流式 + 流式）+ 16k 的 1 格（messages 的 role 直通）；16h-7 是 `safe` 策略下的具名 400，codec 层 4xx 不写用量行，因此对计数中性——这个精确的等号就是"被拒绝的请求没有偷偷落一行"的证据。
 - [x] usage 写入按 `request_id` 幂等 — `InsertUsageRecordOnce` + `usage_records.request_id UNIQUE`；迁移集成测试对三种方言断言“同 request_id 二次写入被拒”。阶段 8 起唯一例外：已有 `error` 行可被后到的 `success`/`partial` 覆盖（反之不可），使重试成功的请求不会留下首次尝试的失败为终态；单测覆盖两向与并发。
 - [x] 渠道选择不把请求发给不能服务该客户端协议的渠道 — 阶段 8（决策 ②）：上游协议进入内存缓存与库路径，先按能力过滤候选再算优先级档位；`ErrNoChannelForProtocol` 与 `ErrChannelNotFound` 可区分。`model/channel_select_test.go` 4 例。
 - [x] 用户 Token 汇总可查询 — `/api/usage/{summary,trend,by-user,by-model,by-channel,by-token}` + `/self` 变体；冒烟 `/api/usage/summary` 三指标校验；Dashboard 消费（阶段 6）。
@@ -297,8 +297,8 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 三种协议流式错误不被吞掉 — `relay/sse` 状态机 `UpstreamErrorNotSwallowed`、`MalformedChunkReturnsError`、`PartialOnAbortAndNoDone`；controller 错误分支 `stream.Error` 终局。
 - [x] 工具参数增量不丢失或串台 — `TestState_ToolArgsGroupedByIndex` + `stream_test` 按 index 分组、不拼接。
 - [x] Prompt Caching 字段被正确归一化 — 阶段 5（`NormalizeUsage`：read/write、nil→not_reported、ptr-0→reported、非法→invalid 保原值）。
-- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=249/321`、覆盖率 `9/34`（阶段 10 口径）。
-- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 25 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。同协议直通格子里的 `input_tokens_details.cached_tokens` 与跨协议格子走同一条 `NormalizeUsage`，不存在“直通路径绕过缓存归一化”的旁路。阶段 9 的两格分工正好是这条不变量的双向证据：16i-1 落 Anthropic 上游（其回答总带 `cache_read_input_tokens`），同时抬高命中分子与 reported 分母；16i-2 落 Responses 上游且未带缓存标记，只进 not_reported——同样"走上游并成功"，缓存归类却由上游报了什么决定，与走哪条协议路径无关。阶段 9 的 reported 分母由 7 抬到 9：多出的两格是 16h-6（非流式）与 16i-1（流式），二者都落 Anthropic 上游、各报 40，分子因此 +80、分母 +100。阶段 10 的 16j 两格仍走 chat 上游、不带缓存标记，因此只把 not_reported 由 23 抬到 25，命中分子与 reported 分母都不动。
+- [x] 缓存命中率按 Token 加权 — `usageAggSelect` `Σcache_read/Σreported input`（仅 reported 行进分子分母）；冒烟 `cache_hit_rate=249/321`、覆盖率 `9/35`（阶段 11 口径）。
+- [x] 未报告缓存不显示为 0% 命中 — 聚合分母 0→null，前端 `fmtRate(null)=“—”`；冒烟 26 条 not_reported + Dashboard “未上报缓存数据” 提示 + 覆盖率始终展示。同协议直通格子里的 `input_tokens_details.cached_tokens` 与跨协议格子走同一条 `NormalizeUsage`，不存在“直通路径绕过缓存归一化”的旁路。阶段 9 的两格分工正好是这条不变量的双向证据：16i-1 落 Anthropic 上游（其回答总带 `cache_read_input_tokens`），同时抬高命中分子与 reported 分母；16i-2 落 Responses 上游且未带缓存标记，只进 not_reported——同样"走上游并成功"，缓存归类却由上游报了什么决定，与走哪条协议路径无关。阶段 9 的 reported 分母由 7 抬到 9：多出的两格是 16h-6（非流式）与 16i-1（流式），二者都落 Anthropic 上游、各报 40，分子因此 +80、分母 +100。阶段 10 的 16j 两格与阶段 11 的 16k 一格都走 chat 上游、不带缓存标记，因此只把 not_reported 由 23 抬到 26，命中分子与 reported 分母都不动。
 - [x] Dashboard 显示命中率和覆盖率 — 阶段 6 三指标卡（命中率/调用命中率/覆盖率）。
 - [x] 前端无余额、充值、倍率和费用文案 — 阶段 6 删除 46 个无引用费用键、改写 5 处残留文案、移除 `renderQuota*`；脚本复测引用键中费用词命中为 0。
 - [x] 数据库迁移可重复执行 / 有幂等保护 — `migration.Migrate` 跳过已应用版本；迁移集成测试连跑 3 次 bookkeeping 恒为 {1,2} 不重复；矩阵重启后 `schema_migrations=1,2`。
@@ -307,7 +307,7 @@ ok    github.com/songquanpeng/one-api/relay/channeltype
 - [x] 迁移中断重试、重复执行、备份恢复均验证 — 集成测试重复 Migrate x3（中断重试等价）；矩阵备份(drop+restore)恢复；重启幂等。
 - [x] 迁移报告确认用户/令牌/渠道/权限(角色)/配置/历史日志未丢失 — `reportMigrationCheck` 预检上报 current/target/pending/missing/warnings；矩阵对 users/tokens/channels/logs/options 计数在“升级后→重启→回滚恢复”三个阶段逐一相等。
 
-**总门禁**：`go build ./...` ✅ · `go vet ./...` ✅ 空（须用干净的 `GOCACHE`，见下）· `gofmt -l $(git ls-files '*.go')` ✅ 空 · `go test $(go list ./... | grep -v common/image)` ✅ · 端到端冒烟 `pass=151 fail=0` ✅（阶段 10 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
+**总门禁**：`go build ./...` ✅ · `go vet ./...` ✅ 空（须用干净的 `GOCACHE`，见下）· `gofmt -l $(git ls-files '*.go')` ✅ 空 · `go test $(go list ./... | grep -v common/image)` ✅ · 端到端冒烟 `pass=153 fail=0` ✅（阶段 11 口径；检查清单建立时为 45/0）· 迁移矩阵 PostgreSQL `11/11` ✅ / MySQL `11/11` ✅ · 前端 `npm run build` exit 0（新代码 0 告警）✅。
 
 **`go vet` 的一处存量红（阶段 9 发现，已修复）**：本机 Go 1.26.8 工具链下 `go vet ./...` 报一条 `common/message/email.go:67:44: address format "%s:%d" does not work with IPv6`（`hostport` 分析器）。该文件最后一次改动是 `ececfe5`（2025-02-02，上游），早于本分支全部提交，因此这是工具链版本带来的存量发现，而不是阶段 9 的回归。修复单独成提交：三处 `fmt.Sprintf("%s:%d", host, port)` 收成一处 `net.JoinHostPort(host, strconv.Itoa(port))`。原写法在 IPv6 字面量主机上会拼出非法地址（`::1:25`），`JoinHostPort` 会补方括号；对普通主机名输出逐字相同，故对现有部署无行为变更。修复后全仓 `go vet ./...` 为空。
 
@@ -694,3 +694,89 @@ auto 并记 `forced_tool_choice_downgraded`："我们没送这个工具，就强
    （本地编译 → sftp → `systemctl restart`），服务器上 `/opt/deploy/one-api-aixlab` 是个停在更老
    commit 的克隆，容易误导下一次部署。另：`VERSION` 文件是空的，二进制自报 `v0.0.0`，
    **没法从版本号分辨部署的是哪个提交**，建议下次部署前先填上。
+
+---
+
+## 阶段 11：/v1/messages 的 role 直通
+
+### 完成时间
+2026-10-12。分支 `feat/cross-protocol-matrix` 上 1 个提交：`5a11ce0` + 本文档提交。
+
+### 立项缘由
+**线上报障，又是"实测先于推理"的一例。** 客户端经 Anthropic 入口调用时拿到：
+
+```
+400 messages role 只能是 user/assistant，收到：system
+```
+
+日志坐实：`POST /v1/messages?beta=true`，user root，channel 2，2026-10-12 08:34:08。当天
+`/v1/messages` 共 94 个请求，**74 成功、11 个死在这条**，而且这 11 次是**间歇性**的
+（08:05 ×2、08:10、08:18 ×5、08:34 ×2）——同一个客户端大部分请求能通，只有某些请求的
+`messages` 里带了 `system`。固定发 system 的客户端应该 100% 失败，所以更像"回放某段历史时才
+带上"，例如从 OpenAI 格式导入的对话。网关不记请求体，具体是哪种客户端看不出来。
+
+### 根因
+
+`relay/protocol/messages.go` 的 `messagesInboundToOpenAI` 在入口把 role 限定为
+`user`/`assistant`，别的一律 400。**这是我们自己多出来的严格**，而不是上游的规矩。
+
+### 前提修正
+
+**"Anthropic 只允许 user/assistant，所以我们也要拒绝"是错的。** 三处证据：
+
+| 位置 | 行为 |
+| --- | --- |
+| `relay/adaptor/anthropic/main.go:130` | `role == "system"` 折进顶层 `system` 字段。注释原文：*"later system messages are folded in rather than emitted as role:"system" messages, **which the API rejects**"* |
+| `relay/adaptor/openai_responses/request.go:355` | `case "system", "developer":` 折进 `instructions` |
+| new-api（参考实现） | `claude_messages/to_oai_chat_req.go:167` 就一句 `Role: claudeMessage.Role`，**原样透传、零校验** |
+
+也就是说，**下游三处早就为这个输入写好了处理**：chat 上游本来就接受任意 role，另两个转换器
+各自把 system 折进自己唯一的那个槽位。唯独自家正门把它拦掉——拒绝的恰好是每个下游都准备好
+服务的请求。Anthropic 的 API 与"网关该不该接受"是两回事：网关的价值就在于跨协议翻译。
+
+### 决策（用户已定）
+
+**照 new-api 完全不校验**：role 原样透传。两条路的取舍已经摆明——完全对齐参考实现的代价是
+`role:"banana"` 这类脏数据会被转给上游、报错变成上游的英文错误，而不再是我们具名的中文拒绝；
+用户选了这一条。
+
+### 关键设计
+
+- 只删 role 白名单，**不动 content block 的规则**（`tool_use`/`server_tool_use` 只能出现在
+  assistant 消息里、未知块类型具名拒绝等）。那些是内容形状的规则，不是角色白名单。
+- 留了注释说明"不校验"是**有意的**，免得日后有人当成漏掉的校验再加回来——那样会原样复发。
+
+### 逐提交记录
+
+| 提交 | 内容 |
+| --- | --- |
+| `5a11ce0` | 删掉 role 白名单 + `TestParseMessages_PassesSystemRoleThrough`（新增）+ `bad_role` 用例改靶不删 + 冒烟 16k + 计数更新 |
+
+迁移提交：**无**。
+
+### 测试与验收
+
+- **改靶不删**：`TestParseMessages_RejectsInvalid` 里原本有一条 `bad_role` 断言"带 system 必须
+  被拒"，行为反转后移出该表，由新的 `TestParseMessages_PassesSystemRoleThrough` 承接；其余六个
+  拒绝用例（缺 max_tokens、块类型未知、tool_use 出现在 user 消息等）**不动**——它们仍然必须拒绝。
+- **冒烟 16k**：`/v1/messages` 带一条 system 消息 → 200，且 `mock_last_request.json` 里
+  `messages[0].role=="system"`、`messages[1].role=="user"`。线上这条路径此前**没有任何格子覆盖**，
+  所以它漏到了生产——这正是补这一格的理由。
+- **计数（精确相等，非 `>=`）**：§17/§18 `34→35`，§19 `25→26`，§21 `cache_coverage 9/34→9/35`、
+  `not_reported_cache_calls 25→26`；`cache_hit_rate` 仍 `249/321`、`cache_write_input_tokens` 仍 0。
+  `RESULT pass=151 → pass=153 fail=0`。
+- **命令**：`gofmt -l` 空 ✅ · `go build ./...` ✅ · `go test $(go list ./... | grep -v common/image)`
+  ✅ · `bash scripts/smoke/run_smoke.sh` → `pass=153 fail=0` ✅。
+
+### 剩余限制（阶段 12 输入）
+
+1. **本修复尚未部署**：`5a11ce0` 只在分支上，线上跑的仍是不含它的那版。要生效需要一次部署。
+2. 阶段 10 那批限制仍然成立：`responses ↔ anthropic` 未在生产验证、tool namespace 未实现、
+   上游返回的 `custom_tool_call` 未处理、前端无 `tool_loss_policy`/`upstream_protocol` 界面、
+   `native` 类托管工具全部丢弃、相容性表未收、预检级 usage 行规则未统一。
+3. **socket 激活的切换仍未落地**：`deploy/one-api.socket` 与 `deploy/one-api.service` 已入库，
+   服务器上 `/root` 也暂存了生成好的 unit，但安装 systemd unit 那一步受权限限制没有执行——
+   所以"无感部署"目前只是代码就绪，线上并没有生效。
+4. **`web/build/default` 现在是 Vite 原型产物**（阶段 11 之前那次前端回滚留下的）。这坐实了
+   CLAUDE.md 警告过的路径冲突：`web/default` 的源码不再等于实际发布的前端。建议收一收这个歧义
+   （要么把 `web/modern` 正式收编进 `web/THEMES`，要么把它的 `outDir` 改掉）。

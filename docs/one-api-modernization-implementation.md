@@ -430,6 +430,7 @@ request id
 - text/image block。
 - tool_use / tool_result。
 - 托管块 `server_tool_use` + `web_search_tool_result`、`mcp_tool_use` + `mcp_tool_result`（§6.7）。
+- messages 的 `role`：**不做白名单校验，原样透传**（含 `system`）。Anthropic 自己的 API 只允许 user/assistant，但网关不是 Anthropic——chat 上游接受更多角色，另两个转换器也各自把 system 折进自己唯一的那个槽位（`relay/adaptor/anthropic/main.go` 折进顶层 `system`，`relay/adaptor/openai_responses/request.go` 折进 `instructions`），参考实现同样原样透传。**这里不需要校验**：拒绝它等于拒绝每个下游都已经准备好服务的请求（曾经就是具名 400，线上有客户端因此被打回）。针对 content block 的规则（`tool_use` 只能在 assistant 消息里、未知块具名拒绝等）不受影响，那是内容形状而非角色白名单。
 - `stop_reason`。
 - `stop_sequence`。
 - usage。
