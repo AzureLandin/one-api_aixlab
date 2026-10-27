@@ -1,8 +1,43 @@
+# 版本控制与本地缓存
 .git
-.npmcache
+.gitignore
 .gocache
+.gopath
+.codegraph
+.npmcache
+.claude
+# Docker 凭据目录（buildx 状态）——绝不能进构建上下文
+.dockercfg
+
+# 构建产物：镜像内自己构建，进上下文只会覆盖/污染
+one-api
+one-api-linux-amd64
+*.tar.gz
+*.tar.gz.sha256
+web/build
+web/modern/node_modules
+web/modern/dist
 web/default/node_modules
-scripts/smoke/tiktoken
-scripts/smoke/*.log
-scripts/smoke/*.dump
+web/default/build
+
+# 运行时数据与日志（属于部署机器，不属于镜像）
+data
+one-api.db
+*.db
 *.log
+*.dump
+scripts/smoke/one-api
+scripts/smoke/tiktoken
+scripts/smoke/*.db
+scripts/smoke/*.log
+scripts/smoke/*.out
+scripts/smoke/jar_*
+scripts/smoke/tmp_*
+scripts/smoke/matrix_*
+scripts/smoke/mock_last_*
+
+# 与镜像无关的目录
+docs
+web/modern/.vite
+.vscode
+.idea
