@@ -925,16 +925,20 @@ func customToolInputFromArguments(arguments string) string {
 // buildResponsesUsage maps the normalized usage onto Responses usage fields,
 // keeping the nil-vs-zero semantics: cache details are emitted ONLY when the
 // upstream actually reported them (implementation doc §4.1 pointer rule).
+//
+// input_tokens is the normalized PromptTokens, which is total input (cache
+// included) for every upstream family. cached_tokens comes from the
+// normalized CacheReadInputTokens, so an Anthropic upstream — which reports
+// cache reads but never an OpenAI prompt_tokens_details — is visible here too;
+// the details fields remain fallbacks for a caller that has not normalized.
 func buildResponsesUsage(u relaymodel.Usage) map[string]any {
 	out := map[string]any{
 		"input_tokens":  u.PromptTokens,
 		"output_tokens": u.CompletionTokens,
 		"total_tokens":  u.TotalTokens,
 	}
-	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens != nil {
-		out["input_tokens_details"] = map[string]any{
-			"cached_tokens": *u.PromptTokensDetails.CachedTokens,
-		}
+	if cached, ok := responsesCachedTokens(u); ok {
+		out["input_tokens_details"] = map[string]any{"cached_tokens": cached}
 	}
 	if u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens != 0 {
 		out["output_tokens_details"] = map[string]any{
@@ -942,4 +946,21 @@ func buildResponsesUsage(u relaymodel.Usage) map[string]any {
 		}
 	}
 	return out
+}
+
+// responsesCachedTokens returns the cache read count in any of the three shapes
+// it can arrive in, or false when the upstream reported none. The normalized
+// field is authoritative; the detail shapes are read only for callers that
+// build a Usage by hand and skip NormalizeUsage.
+func responsesCachedTokens(u relaymodel.Usage) (int, bool) {
+	if u.CacheReadInputTokens != nil {
+		return int(*u.CacheReadInputTokens), true
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens != nil {
+		return *u.PromptTokensDetails.CachedTokens, true
+	}
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
+		return *u.InputTokensDetails.CachedTokens, true
+	}
+	return 0, false
 }

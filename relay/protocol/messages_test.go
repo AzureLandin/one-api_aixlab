@@ -174,9 +174,17 @@ func TestRenderMessages_Text(t *testing.T) {
 	if env["stop_reason"] != "end_turn" {
 		t.Fatalf("stop_reason wrong: %v", env["stop_reason"])
 	}
-	usage := env["usage"].(map[string]int)
+	usage := env["usage"].(map[string]any)
 	if usage["input_tokens"] != 12 || usage["output_tokens"] != 4 {
 		t.Fatalf("usage wrong: %+v", usage)
+	}
+	// The upstream reported no cache, so the envelope must not carry a
+	// fabricated cache_read_input_tokens: 0.
+	if _, ok := usage["cache_read_input_tokens"]; ok {
+		t.Fatalf("absent cache must be omitted, got %+v", usage)
+	}
+	if _, ok := usage["cache_creation_input_tokens"]; ok {
+		t.Fatalf("absent cache write must be omitted, got %+v", usage)
 	}
 }
 

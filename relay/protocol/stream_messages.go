@@ -55,16 +55,21 @@ func NewMessagesStream(w *sse.Writer, id, model string, usage *relaymodel.Usage)
 		hostedCall:   map[string]bool{},
 		hostedResult: map[string]bool{},
 	}
-	inputTokens := 0
+	// The seed usage is the gateway's own prompt estimate, so no cache field
+	// exists yet; it is still rendered through the same helper so the input
+	// side has the Anthropic (residual) meaning from the first event. The
+	// authoritative usage, including cache fields, arrives at Finish.
+	usageEvent := map[string]any{"input_tokens": 0, "output_tokens": 0}
 	if usage != nil {
-		inputTokens = usage.PromptTokens
+		usageEvent = renderMessagesUsage(*usage)
+		usageEvent["output_tokens"] = 0
 	}
 	_ = w.Event("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": m.id, "type": "message", "role": "assistant", "model": m.model,
 			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]int{"input_tokens": inputTokens, "output_tokens": 0},
+			"usage": usageEvent,
 		},
 	})
 	return m
@@ -330,7 +335,11 @@ func (m *MessagesStream) Finish(finishReason string, usage *relaymodel.Usage) er
 	}
 	out := map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil}}
 	if usage != nil {
-		out["usage"] = map[string]int{"output_tokens": usage.CompletionTokens}
+		// Repeat the input side and the cache fields here as well as in
+		// message_start: the terminal delta is the only event that carries the
+		// authoritative usage, and a client that reads cache fields from it must
+		// not be told an uncached number. Nil cache fields stay omitted.
+		out["usage"] = renderMessagesUsage(*usage)
 	}
 	_ = m.w.Event("message_delta", out)
 	_ = m.w.Event("message_stop", map[string]any{"type": "message_stop"})

@@ -564,8 +564,7 @@ func finishReasonToStopReason(finish string) *string {
 }
 
 // RenderMessages converts an upstream OpenAI chat.completion into an Anthropic
-// Messages response (§6.5). usage keeps nil-vs-zero semantics; Anthropic's
-// Usage only has input/output tokens.
+// Messages response (§6.5).
 func RenderMessages(upstream *openai.TextResponse, model string) map[string]any {
 	// Hosted artifacts come first: in a Claude turn the search precedes the
 	// answer, and a server_tool_use the client cannot see the result of is worse
@@ -608,12 +607,28 @@ func RenderMessages(upstream *openai.TextResponse, model string) map[string]any 
 		"model":       model,
 		"content":     content,
 		"stop_reason": stopReason,
-		"usage": map[string]int{
-			"input_tokens":  upstream.Usage.PromptTokens,
-			"output_tokens": upstream.Usage.CompletionTokens,
-		},
+		"usage":       renderMessagesUsage(upstream.Usage),
 	}
 	return envelope
+}
+
+// renderMessagesUsage renders the normalized usage into Anthropic's usage
+// object. Normalized PromptTokens is TOTAL input, while Anthropic's
+// input_tokens is the *uncached remainder*, so the cache fields are subtracted
+// from input_tokens and emitted beside it. A cache field the upstream did not
+// report is omitted entirely — never sent as 0 (nil-vs-zero, §4.1).
+func renderMessagesUsage(u relaymodel.Usage) map[string]any {
+	out := map[string]any{
+		"input_tokens":  u.PromptResidual(),
+		"output_tokens": u.CompletionTokens,
+	}
+	if u.CacheReadInputTokens != nil {
+		out["cache_read_input_tokens"] = int(*u.CacheReadInputTokens)
+	}
+	if u.CacheWriteInputTokens != nil {
+		out["cache_creation_input_tokens"] = int(*u.CacheWriteInputTokens)
+	}
+	return out
 }
 
 // messagesHostedArtifact is what one neutral artifact becomes on the Claude

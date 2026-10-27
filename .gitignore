@@ -45,3 +45,7 @@ web/build.log
 /web/docker_mysql_pull.log
 /scripts/smoke/matrix_*.dump
 /scripts/smoke/matrix_*.db
+
+# 缓存口径端到端脚本的一次性运行目录
+/scripts/smoke/.usage-e2e/
+__pycache__/

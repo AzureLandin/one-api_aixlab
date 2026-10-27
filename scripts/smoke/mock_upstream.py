@@ -52,9 +52,14 @@ def sse_event(obj, event=None):
     return "\n".join(lines).encode()
 
 
-def stream_chunks():
+def stream_chunks(cached=False):
     """Mimic an OpenAI streaming chat.completion: 2 text deltas, a terminal usage
-    chunk (stream_options.include_usage), then [DONE]."""
+    chunk (stream_options.include_usage), then [DONE].
+
+    cached mirrors the non-stream fixture: a prompt carrying the usecache marker
+    reports prompt_tokens_details.cached_tokens so the client-side write-back can
+    be asserted for the streaming path too.
+    """
     yield sse_event({
         "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000,
         "model": "gpt-3.5-turbo",
@@ -66,10 +71,12 @@ def stream_chunks():
         "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}],
     })
     # usage tail chunk (no choices), as produced with stream_options.include_usage
+    usage = {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+    if cached:
+        usage["prompt_tokens_details"] = {"cached_tokens": 3}
     yield sse_event({
         "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000,
-        "model": "gpt-3.5-turbo", "choices": [],
-        "usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+        "model": "gpt-3.5-turbo", "choices": [], "usage": usage,
     })
     yield b"data: [DONE]\n\n"
 
@@ -533,7 +540,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 elif tools:
                     chunks = stream_tool_chunks()
                 else:
-                    chunks = stream_chunks()
+                    chunks = stream_chunks(cached=b"usecache" in raw)
                 for chunk in chunks:
                     self.wfile.write(chunk)
                     self.wfile.flush()
