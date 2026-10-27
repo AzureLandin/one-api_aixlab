@@ -1,49 +1,119 @@
-version: '3.4'
+# One API (aixlab) — SQLite only, no Redis, no external database.
+#
+# Topology
+#   nginx :80  -> published as localhost:${ONEAPI_HTTP_PORT:-3000}
+#     upstream primary  one-api-a:3000
+#     upstream standby  one-api-b:3000 (backup)
+#   The two app containers publish NO host port. See deploy/nginx/default.conf
+#   for why that matters (client IP feeds rate limiting and token subnets).
+#
+# SQLite is a single-writer database. one-api-a serves all traffic; one-api-b is
+# a warm standby that runs but only receives traffic when a is down. Do NOT
+# scale either service (`--scale one-api-a=2`): two writers on one SQLite file
+# is not supported, and nginx would round-robin across them once both are up.
+# The standby's health check hits /api/status, which is a pure read.
+#
+# Rolling rebuild (zero-502, traffic moves to the other instance automatically):
+#   docker compose up -d --no-deps --build one-api-b   # rebuild standby
+#   docker compose up -d --no-deps --build one-api-a   # rebuild primary
+# --no-deps keeps nginx and the peer untouched.
+
+name: one-api-aixlab
+
+x-one-api: &one-api
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      VERSION: ${VERSION:-docker}
+  image: one-api-aixlab:${VERSION:-docker}
+  restart: unless-stopped
+  # Internal only. No `ports:`.
+  expose:
+    - "3000"
+  volumes:
+    - oneapi-data:/data
+    - oneapi-logs:/var/log/one-api
+  environment:
+    # Required: with two instances, an unset value would make each generate a
+    # different random secret, breaking sessions on failover.
+    SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (reuse the production value)}
+    TZ: ${TZ:-Asia/Shanghai}
+    SQLITE_PATH: /data/one-api.db
+    TIKTOKEN_CACHE_DIR: /data/tiktoken
+    # The app drains in-flight requests on SIGTERM for this long.
+    SHUTDOWN_TIMEOUT_SECONDS: ${SHUTDOWN_TIMEOUT_SECONDS:-600}
+  # Must exceed SHUTDOWN_TIMEOUT_SECONDS, or Docker SIGKILLs mid-drain and
+  # cuts off answers that were still being written.
+  stop_grace_period: 700s
+  healthcheck:
+    # /api/status is a pure read (controller/misc.go) — safe on the standby.
+    # start_period covers DB migration plus tiktoken loading.
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/status || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
 
 services:
-  one-api:
-    image: "${REGISTRY:-docker.io}/justsong/one-api:latest"
-    container_name: one-api
-    restart: always
-    command: --log-dir /app/logs
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./data/oneapi:/data
-      - ./logs:/app/logs
-    environment:
-      - SQL_DSN=oneapi:123456@tcp(db:3306)/one-api  # 修改此行，或注释掉以使用 SQLite 作为数据库
-      - REDIS_CONN_STRING=redis://redis
-      - SESSION_SECRET=random_string  # 修改为随机字符串
-      - TZ=Asia/Shanghai
-#      - NODE_TYPE=slave  # 多机部署时从节点取消注释该行
-#      - SYNC_FREQUENCY=60  # 需要定期从数据库加载数据时取消注释该行
-#      - FRONTEND_BASE_URL=https://openai.justsong.cn  # 多机部署时从节点取消注释该行
+  one-api-a:
+    <<: *one-api
+    container_name: one-api-a
+    networks:
+      default:
+        ipv4_address: 172.31.240.11
+
+  one-api-b:
+    <<: *one-api
+    container_name: one-api-b
+    networks:
+      default:
+        ipv4_address: 172.31.240.12
+    # The standby waits for the primary's first boot so two processes cannot
+    # race through schema migration on a fresh database. Rolling restarts use
+    # --no-deps and are unaffected by this.
     depends_on:
-      - redis
-      - db
-    healthcheck:
-      test: [ "CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' | awk -F: '{print $2}'" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      one-api-a:
+        condition: service_healthy
 
-  redis:
-    image: "${REGISTRY:-docker.io}/redis:latest"
-    container_name: redis
-    restart: always
-
-  db:
-    image: "${REGISTRY:-docker.io}/mysql:8.2.0"
-    restart: always
-    container_name: mysql
-    volumes:
-      - ./data/mysql:/var/lib/mysql  # 挂载目录，持久化存储
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: one-api-nginx
+    restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.31.240.10
+    # The ONLY published port in the stack.
     ports:
-      - '3306:3306'
-    environment:
-      TZ: Asia/Shanghai   # 设置时区
-      MYSQL_ROOT_PASSWORD: 'OneAPI@justsong' # 设置 root 用户的密码
-      MYSQL_USER: oneapi   # 创建专用用户
-      MYSQL_PASSWORD: '123456'    # 设置专用用户密码
-      MYSQL_DATABASE: one-api   # 自动创建数据库
+      - "${ONEAPI_HTTP_PORT:-3000}:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      one-api-a:
+        condition: service_healthy
+      one-api-b:
+        condition: service_healthy
+    healthcheck:
+      # Proxied request, so this fails if nginx cannot reach any app either.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/api/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # Fixed addresses let nginx resolve the app names once at startup and keep
+  # using them when a container is recreated (a recreated container otherwise
+  # gets a new IP, which nginx would cache until restarted). Change the subnet
+  # if 172.31.240.0/24 collides with the host.
+  default:
+    name: one-api-aixlab
+    ipam:
+      config:
+        - subnet: 172.31.240.0/24
+
+volumes:
+  # one-api.db and tiktoken/ live here.
+  oneapi-data:
+  # oneapi*.log. Both instances append to the same volume; fine for audit logs.
+  oneapi-logs:
