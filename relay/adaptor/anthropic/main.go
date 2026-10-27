@@ -708,11 +708,19 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 // RelayUsage converts one Anthropic usage block into the normalized usage fact.
 // The cache fields keep their pointer identity: an absent field stays nil and is
 // never coerced to a zero cache hit (§8.1/§8.2).
+//
+// PromptTokens is TOTAL input. Anthropic's input_tokens excludes cache tokens
+// (a cache read is billed/reported beside it, not inside it), while the
+// normalized fact uses the OpenAI meaning where prompt_tokens includes them.
+// Adding the cache fields here is what makes the stored fact and the cache hit
+// rate comparable across upstream families; without it a cache read could even
+// exceed the residual input and be misclassified as invalid by NormalizeUsage.
 func RelayUsage(u Usage) model.Usage {
+	promptTokens := anthropicTotalInputTokens(u)
 	out := model.Usage{
-		PromptTokens:     u.InputTokens,
+		PromptTokens:     promptTokens,
 		CompletionTokens: u.OutputTokens,
-		TotalTokens:      u.InputTokens + u.OutputTokens,
+		TotalTokens:      promptTokens + u.OutputTokens,
 		// §8.1: Anthropic cache_read -> normalized cache_read, cache_creation ->
 		// normalized cache_write.
 		CacheReadInputTokens:  i64Ptr(u.CacheReadInputTokens),
@@ -722,6 +730,34 @@ func RelayUsage(u Usage) model.Usage {
 	}
 	model.NormalizeUsage(&out)
 	return out
+}
+
+// anthropicTotalInputTokens applies the normalized total-input meaning to an
+// Anthropic usage block. Absent cache fields contribute nothing and stay absent
+// on the way out; this only decides the scalar sum.
+func anthropicTotalInputTokens(u Usage) int {
+	total := u.InputTokens
+	if u.CacheReadInputTokens != nil {
+		total += *u.CacheReadInputTokens
+	}
+	if u.CacheCreationInputTokens != nil {
+		total += *u.CacheCreationInputTokens
+	}
+	return total
+}
+
+// normalizedCacheTokens returns the cache tokens already adopted into acc. It
+// mirrors RelayUsage's sum so a stream delta that repeats the input side is
+// totalized against the cache values accumulated from earlier events.
+func normalizedCacheTokens(u model.Usage) int {
+	total := 0
+	if u.CacheReadInputTokens != nil {
+		total += int(*u.CacheReadInputTokens)
+	}
+	if u.CacheWriteInputTokens != nil {
+		total += int(*u.CacheWriteInputTokens)
+	}
+	return total
 }
 
 // AccumulateStreamUsage folds one Anthropic stream event's usage into acc and
@@ -751,18 +787,21 @@ func AccumulateStreamUsage(acc *model.Usage, ev *StreamResponse) bool {
 		acc.Source = model.UsageSourceReported
 		return true
 	case ev.Usage != nil:
-		// Cumulative, not incremental. Input is not repeated here, so it is only
-		// taken when the event actually states it.
-		if ev.Usage.InputTokens > 0 {
-			acc.PromptTokens = ev.Usage.InputTokens
-		}
-		acc.CompletionTokens = ev.Usage.OutputTokens
+		// Cumulative, not incremental. Adopt the cache fields first: an input
+		// count in this event is the Anthropic residual, so the total has to be
+		// rebuilt from the cache values the stream has reported so far.
 		if v := i64Ptr(ev.Usage.CacheReadInputTokens); v != nil {
 			acc.CacheReadInputTokens = v
 		}
 		if v := i64Ptr(ev.Usage.CacheCreationInputTokens); v != nil {
 			acc.CacheWriteInputTokens = v
 		}
+		// Input is not repeated here, so it is only taken when the event
+		// actually states it.
+		if ev.Usage.InputTokens > 0 {
+			acc.PromptTokens = ev.Usage.InputTokens + normalizedCacheTokens(*acc)
+		}
+		acc.CompletionTokens = ev.Usage.OutputTokens
 		acc.TotalTokens = acc.PromptTokens + acc.CompletionTokens
 		acc.Source = model.UsageSourceReported
 		return true

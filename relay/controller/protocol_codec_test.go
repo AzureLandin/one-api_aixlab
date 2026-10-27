@@ -320,8 +320,10 @@ func TestAnthropicChatStreamTranslatesTextAndTools(t *testing.T) {
 	if outcome.Usage == nil {
 		t.Fatal("usage is nil, want a reported fact")
 	}
-	if outcome.Usage.PromptTokens != 30 || outcome.Usage.CompletionTokens != 9 || outcome.Usage.TotalTokens != 39 {
-		t.Fatalf("usage = %+v, want 30/9/39", outcome.Usage)
+	// Anthropic's input_tokens is the residual (30); normalized PromptTokens is
+	// total input, so the reported cache read (7) is added: 37/9/46.
+	if outcome.Usage.PromptTokens != 37 || outcome.Usage.CompletionTokens != 9 || outcome.Usage.TotalTokens != 46 {
+		t.Fatalf("usage = %+v, want 37/9/46", outcome.Usage)
 	}
 	if outcome.Usage.Source != relaymodel.UsageSourceReported {
 		t.Fatalf("source = %s, want reported", outcome.Usage.Source)
@@ -449,8 +451,9 @@ func TestAnthropicChatNonStreamResponseReportsUsage(t *testing.T) {
 	if usage.Source != relaymodel.UsageSourceReported {
 		t.Fatalf("source = %s, want reported", usage.Source)
 	}
-	if usage.PromptTokens != 11 || usage.CompletionTokens != 4 || usage.TotalTokens != 15 {
-		t.Fatalf("usage = %+v, want 11/4/15", usage)
+	// input_tokens 11 is the residual; cache_creation 3 belongs to total input.
+	if usage.PromptTokens != 14 || usage.CompletionTokens != 4 || usage.TotalTokens != 18 {
+		t.Fatalf("usage = %+v, want 14/4/18", usage)
 	}
 	if usage.CacheWriteInputTokens == nil || *usage.CacheWriteInputTokens != 3 {
 		t.Fatalf("cache write = %v, want the reported 3", usage.CacheWriteInputTokens)
@@ -738,6 +741,8 @@ func TestOpenAIResponsesNonStreamResponseReportsUsage(t *testing.T) {
 	if usage.Source != relaymodel.UsageSourceReported {
 		t.Fatalf("source = %s, want reported", usage.Source)
 	}
+	// Responses input_tokens already INCLUDES the cached subset, so the total
+	// input stays 11; the cache read is a detail, not an addend.
 	if usage.PromptTokens != 11 || usage.CompletionTokens != 4 || usage.TotalTokens != 15 {
 		t.Fatalf("usage = %+v, want 11/4/15", usage)
 	}

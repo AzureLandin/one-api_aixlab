@@ -243,7 +243,9 @@ sys.exit(0 if ok else 1)
 PY
 sleep 1
 MR=$(sqlite3 one-api.db "select status||'|'||usage_source||'|'||input_tokens||'|'||output_tokens||'|'||cache_usage_status||'|'||coalesce(cache_read_input_tokens,-1)||'|'||coalesce(cache_write_input_tokens,-1)||'|'||total_tokens from usage_records order by id desc limit 1;")
-check "passthrough non-stream usage fact" "success|reported|50|12|reported|40|-1|62" "$MR"
+# 90 是统一后的总输入：上游 input_tokens 50 是未命中残余，加上 cache_read 40；
+# total_tokens 相应从 62 变成 102。口径统一后，Anthropic 行与 OpenAI 行可比。
+check "passthrough non-stream usage fact" "success|reported|90|12|reported|40|-1|102" "$MR"
 
 # 16c-2 流式：逐事件镜像上游 SSE（含 thinking 块与缓存字段），无 [DONE] 尾标
 curl -s -N -D tmp_pass_msg_sse.h -o tmp_pass_msg_sse.txt -X POST http://127.0.0.1:13000/v1/messages \
@@ -269,7 +271,7 @@ grep -q '\[DONE\]' tmp_pass_msg_sse.txt \
   || { echo "PASS: no OpenAI [DONE] marker in messages stream"; pass=$((pass+1)); }
 # 用量归集：message_delta 的 output_tokens 是累计值，赋值而非累加（累加会得 13）
 sleep 1
-CUM=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=50 and output_tokens=12 and total_tokens=62 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
+CUM=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=90 and output_tokens=12 and total_tokens=102 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
 [ "$CUM" = 2 ] && { echo "PASS: passthrough stream usage cumulative, absent cache NULL"; pass=$((pass+1)); } || { echo "FAIL: matching passthrough rows=$CUM (want 2)"; fail=$((fail+1)); }
 
 # 16c-3 上游收到的是客户端自己的字节：模型已映射，其余字段逐字未改
@@ -327,7 +329,7 @@ u=d.get('usage') or {}
 ok=(d.get('object')=='response' and d.get('status')=='completed'
     and [i.get('type') for i in items]==['message']
     and [p.get('text') for p in content]==['ok']
-    and (u.get('input_tokens'),u.get('output_tokens'),u.get('total_tokens'))==(50,12,62))
+    and (u.get('input_tokens'),u.get('output_tokens'),u.get('total_tokens'))==(90,12,102))
 sys.exit(0 if ok else 1)
 PY
 # 上游收到的是 Messages 体（转换后的形态），不是客户端自己的 Responses 体
@@ -350,11 +352,11 @@ grep -q 'event: response.output_text.delta' tmp_xlate_resp_sse.txt \
   && { echo "PASS: translated Anthropic stream renders response.* events"; pass=$((pass+1)); } || { echo "FAIL: $(head -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
 grep -q '"delta":"o"' tmp_xlate_resp_sse.txt && grep -q '"delta":"k"' tmp_xlate_resp_sse.txt \
   && { echo "PASS: cross-protocol deltas not concatenated"; pass=$((pass+1)); } || { echo "FAIL: $(tail -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
-grep -q '"input_tokens":50' tmp_xlate_resp_sse.txt && grep -q '"output_tokens":12' tmp_xlate_resp_sse.txt \
+grep -q '"input_tokens":90' tmp_xlate_resp_sse.txt && grep -q '"output_tokens":12' tmp_xlate_resp_sse.txt \
   && { echo "PASS: cross-protocol stream reported usage"; pass=$((pass+1)); } || { echo "FAIL: usage $(tail -c 400 tmp_xlate_resp_sse.txt)"; fail=$((fail+1)); }
 # 用量事实与直通路径落在同一组数字上：同一份上游响应，镜像与翻译不得各记一套
 sleep 1
-XU=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=50 and output_tokens=12 and total_tokens=62 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
+XU=$(sqlite3 one-api.db "select count(*) from usage_records where model_name='claude-upstream-actual' and status='success' and usage_source='reported' and input_tokens=90 and output_tokens=12 and total_tokens=102 and cache_read_input_tokens=40 and cache_write_input_tokens is null;")
 [ "$XU" = 4 ] && { echo "PASS: translated rows match the mirrored ones (4 = 2 mirror + 2 codec)"; pass=$((pass+1)); } || { echo "FAIL: matching anthropic rows=$XU (want 4)"; fail=$((fail+1)); }
 
 # 工具声明（三种客户端协议各自的形状）。定义在这里，供 16f 的跨协议工具格子和
@@ -978,15 +980,17 @@ NR=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_st
 #     分别贡献第 5 条与第 6 条 Anthropic 缓存行（各 40）。
 RCC=$(sqlite3 one-api.db "select count(*) from usage_records where cache_usage_status='reported';")
 [ "$RCC" = 9 ] && { echo "PASS: 9 reported-cache rows"; pass=$((pass+1)); } || { echo "FAIL: reported-cache rows=$RCC"; fail=$((fail+1)); }
-# 21. 管理端聚合三指标：cache_hit_rate = 249/321（209+40 命中 / 271+50 上报输入）；
-#     coverage = 9/35。分母只由上报缓存的行构成，16i-1 抬高分子与分母，16i-2、16j、16k
-#     那几格只进 not_reported_cache_calls。
+# 21. 管理端聚合三指标：cache_hit_rate = 249/561。分母只由上报缓存的行构成。
+#     口径统一后 Anthropic 行按总输入计入：6 条各 90（残余 50 + 命中 40），
+#     所以分母从旧的 321（6 条各 50）变成 561。命中分子 249 不变。
+#     coverage = 9/35。16i-1 抬高分子与分母，16i-2、16j、16k 那几格只进
+#     not_reported_cache_calls。
 #     缓存写入仍是 0：没有任何夹具上报过 cache 创建，这个 0 是"确实没有"而非"没问"。
 curl -s -b jar_root.txt 'http://127.0.0.1:13000/api/usage/summary' > tmp_sum.json
 python3 - <<'PY' && { echo "PASS: /api/usage/summary metrics"; pass=$((pass+1)); } || { echo "FAIL: summary $(cat tmp_sum.json)"; fail=$((fail+1)); }
 import json,sys
 d=json.load(open('tmp_sum.json'))['data']
-ok=(abs(d['cache_hit_rate']-249/321)<1e-9 and d['call_hit_rate']==1.0
+ok=(abs(d['cache_hit_rate']-249/561)<1e-9 and d['call_hit_rate']==1.0
     and abs(d['cache_coverage']-9/35)<1e-9 and d['cache_read_input_tokens']==249
     and d['cache_write_input_tokens']==0 and d['not_reported_cache_calls']==26)
 sys.exit(0 if ok else 1)

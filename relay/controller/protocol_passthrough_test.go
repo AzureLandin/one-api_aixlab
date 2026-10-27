@@ -405,8 +405,10 @@ func TestMessagesMirrorReportedStream(t *testing.T) {
 	if u.Source != relaymodel.UsageSourceReported {
 		t.Fatalf("Source = %s, want reported", u.Source)
 	}
-	if u.PromptTokens != 100 || u.CompletionTokens != 12 || u.TotalTokens != 112 {
-		t.Fatalf("usage = %+v, want prompt 100 completion 12 total 112", u)
+	// Message_start's input_tokens 100 is the Anthropic residual; normalized
+	// PromptTokens is total input, so the reported cache read (40) is added.
+	if u.PromptTokens != 140 || u.CompletionTokens != 12 || u.TotalTokens != 152 {
+		t.Fatalf("usage = %+v, want prompt 140 completion 12 total 152", u)
 	}
 	if u.CacheReadInputTokens == nil || *u.CacheReadInputTokens != 40 {
 		t.Fatalf("cache read = %v, want 40", u.CacheReadInputTokens)
@@ -440,9 +442,10 @@ func TestMessagesMirrorInterruptedStreamIsPartialAndEstimated(t *testing.T) {
 	if u.Source != relaymodel.UsageSourceEstimated {
 		t.Fatalf("Source = %s, want estimated", u.Source)
 	}
-	// The input side really was reported, so it is kept rather than zeroed.
-	if u.PromptTokens != 100 {
-		t.Fatalf("PromptTokens = %d, want the reported 100", u.PromptTokens)
+	// The input side really was reported, so it is kept rather than zeroed —
+	// and totalized with the cache read that came beside it (100 + 40).
+	if u.PromptTokens != 140 {
+		t.Fatalf("PromptTokens = %d, want the reported 100 plus cache 40", u.PromptTokens)
 	}
 	if u.CacheReadInputTokens == nil || *u.CacheReadInputTokens != 40 {
 		t.Fatalf("reported cache read must survive the estimate, got %v", u.CacheReadInputTokens)

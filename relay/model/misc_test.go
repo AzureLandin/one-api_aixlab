@@ -99,3 +99,79 @@ func TestNormalizeUsageInputDetailsFallback(t *testing.T) {
 		t.Fatalf("input_tokens_details must map to cache read, got %+v", u)
 	}
 }
+
+// A cache write being reported must not hide a cache read that arrived in the
+// protocol details: the two sides are folded independently.
+func TestNormalizeUsageFoldsReadWhenWriteAlsoReported(t *testing.T) {
+	u := &Usage{
+		PromptTokens:          100,
+		CacheWriteInputTokens: i64(10),
+		PromptTokensDetails:   &PromptTokensDetails{CachedTokens: ip(40)},
+	}
+	NormalizeUsage(u)
+	if u.CacheReadInputTokens == nil || *u.CacheReadInputTokens != 40 {
+		t.Fatalf("cache read from details not folded: %v", u.CacheReadInputTokens)
+	}
+	if u.CacheStatus != CacheUsageReported {
+		t.Fatalf("want reported, got %q", u.CacheStatus)
+	}
+}
+
+// A chat client reads the hit from prompt_tokens_details. The normalizer
+// derives that view from the single normalized value, preserving a reported
+// zero and never inventing one.
+func TestNormalizeUsageDerivesChatDetailsFromNormalizedCache(t *testing.T) {
+	u := &Usage{PromptTokens: 100, CacheReadInputTokens: i64(40)}
+	NormalizeUsage(u)
+	if u.PromptTokensDetails == nil || u.PromptTokensDetails.CachedTokens == nil ||
+		*u.PromptTokensDetails.CachedTokens != 40 {
+		t.Fatalf("chat details not derived: %+v", u.PromptTokensDetails)
+	}
+
+	zero := &Usage{PromptTokens: 100, CacheReadInputTokens: i64(0)}
+	NormalizeUsage(zero)
+	if zero.PromptTokensDetails == nil || zero.PromptTokensDetails.CachedTokens == nil ||
+		*zero.PromptTokensDetails.CachedTokens != 0 {
+		t.Fatalf("a reported zero must be derived as zero, got %+v", zero.PromptTokensDetails)
+	}
+
+	silent := &Usage{PromptTokens: 100}
+	NormalizeUsage(silent)
+	if silent.PromptTokensDetails != nil {
+		t.Fatalf("absent cache must not fabricate details: %+v", silent.PromptTokensDetails)
+	}
+}
+
+// After adaptor normalization PromptTokens is total input, so read+write is a
+// subset and the cache is reported. This is the invariant that replaced the
+// residual-shaped check that only held for OpenAI-style upstreams.
+func TestNormalizeUsageTotalInputIsTheCacheSuperset(t *testing.T) {
+	u := &Usage{
+		PromptTokens:          100, // total input: read 40 + write 10 + residual 50
+		CacheReadInputTokens:  i64(40),
+		CacheWriteInputTokens: i64(10),
+	}
+	NormalizeUsage(u)
+	if u.CacheStatus != CacheUsageReported {
+		t.Fatalf("want reported, got %q", u.CacheStatus)
+	}
+}
+
+func TestPromptResidual(t *testing.T) {
+	u := Usage{
+		PromptTokens:          100,
+		CacheReadInputTokens:  i64(40),
+		CacheWriteInputTokens: i64(10),
+	}
+	if got := u.PromptResidual(); got != 50 {
+		t.Fatalf("residual = %d, want 50", got)
+	}
+	if got := (&Usage{PromptTokens: 25}).PromptResidual(); got != 25 {
+		t.Fatalf("without cache residual = %d, want the whole prompt 25", got)
+	}
+	// Inconsistent data is clamped rather than rendered as a negative count.
+	bad := Usage{PromptTokens: 10, CacheReadInputTokens: i64(40)}
+	if got := bad.PromptResidual(); got != 0 {
+		t.Fatalf("inconsistent residual = %d, want 0", got)
+	}
+}

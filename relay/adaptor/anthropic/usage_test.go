@@ -216,3 +216,59 @@ func TestAccumulateStreamUsage_IgnoresEventsWithoutUsage(t *testing.T) {
 		t.Fatalf("accumulator mutated by a usage-less event: %+v", acc)
 	}
 }
+
+// Anthropic's input_tokens is the residual, so the normalized total input has
+// to add both cache fields. The same conversion makes the normalized chat view
+// (prompt_tokens_details) available without a second source of truth.
+func TestRelayUsage_TotalInputIncludesCache(t *testing.T) {
+	read, write := 40, 10
+	u := RelayUsage(Usage{
+		InputTokens: 50, OutputTokens: 7,
+		CacheReadInputTokens: &read, CacheCreationInputTokens: &write,
+	})
+	if u.PromptTokens != 100 || u.CompletionTokens != 7 || u.TotalTokens != 107 {
+		t.Fatalf("usage = %+v, want 100/7/107", u)
+	}
+	if u.CacheStatus != relaymodel.CacheUsageReported {
+		t.Fatalf("CacheStatus = %s, want reported", u.CacheStatus)
+	}
+	if u.PromptTokensDetails == nil || u.PromptTokensDetails.CachedTokens == nil ||
+		*u.PromptTokensDetails.CachedTokens != 40 {
+		t.Fatalf("chat details not derived: %+v", u.PromptTokensDetails)
+	}
+}
+
+// The regression this change exists for: a real Anthropic response can report
+// cache_read > input_tokens, because input_tokens is only the uncached
+// remainder. Once totalized, it is a consistent, reported fact — not invalid.
+func TestRelayUsage_CacheReadGreaterThanResidualIsReported(t *testing.T) {
+	read := 400
+	u := RelayUsage(Usage{InputTokens: 5, OutputTokens: 2, CacheReadInputTokens: &read})
+	if u.PromptTokens != 405 {
+		t.Fatalf("PromptTokens = %d, want 405 (5 residual + 400 read)", u.PromptTokens)
+	}
+	if u.CacheStatus != relaymodel.CacheUsageReported {
+		t.Fatalf("CacheStatus = %s, want reported, not invalid", u.CacheStatus)
+	}
+	if *u.CacheReadInputTokens != 400 {
+		t.Fatalf("cache read = %d, want the reported 400", *u.CacheReadInputTokens)
+	}
+	relaymodel.NormalizeUsage(&u)
+	if u.CacheStatus != relaymodel.CacheUsageReported {
+		t.Fatalf("re-normalizing must stay reported, got %s", u.CacheStatus)
+	}
+}
+
+// A stream can repeat the residual input in message_delta. It is totalized
+// against the cache values adopted from earlier events, never treated as a
+// total on its own.
+func TestAccumulateStreamUsage_TotalizesRepeatedResidualInput(t *testing.T) {
+	u := accumulateStream(t,
+		`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,
+			"cache_read_input_tokens":40,"cache_creation_input_tokens":5}}}`,
+		`{"type":"message_delta","usage":{"input_tokens":10,"output_tokens":7}}`,
+	)
+	if u.PromptTokens != 55 || u.CompletionTokens != 7 || u.TotalTokens != 62 {
+		t.Fatalf("usage = %+v, want 55/7/62", u)
+	}
+}
