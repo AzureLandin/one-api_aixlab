@@ -14,7 +14,6 @@ import Setting from './pages/Setting';
 import Users from './pages/Users';
 import Profile from './pages/Profile';
 import Login from './pages/Login';
-import Register from './pages/Register';
 
 function ProtectedRoute({ children, adminOnly = false, rootOnly = false }) {
   const { user, isAdmin, isRoot } = useAuth();
@@ -28,7 +27,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
+      {/* 注册已收口到面板，/register 直接引导去面板登录 */}
+      <Route path="/register" element={<Navigate to="/login" replace />} />
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
       {/* 控制台路由 */}

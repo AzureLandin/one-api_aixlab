@@ -13,6 +13,26 @@ export function AuthProvider({ children }) {
     }
   });
 
+  // 自愈：localStorage 为空但 session cookie 有效时（例如 SSO 只写了 cookie，
+  // 或用户清了站点数据但 cookie 还在），从后端取回用户信息补写 localStorage。
+  useEffect(() => {
+    if (user) return;
+    let cancelled = false;
+    fetch('/api/user/self', { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (cancelled || !body?.success || !body?.data) return;
+        localStorage.setItem('user', JSON.stringify(body.data));
+        setUser(body.data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // 只在首次挂载时检查一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const login = (userData) => {
     localStorage.setItem('user', JSON.stringify(userData));
     setUser(userData);

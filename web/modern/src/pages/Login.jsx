@@ -1,60 +1,33 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/Card';
-import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
-import { API } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
-import { toast } from 'react-toastify';
+
+// 面板（统一账号系统）登录地址，登录后会带 redirect=model_center 自动跳回本站
+const PANEL_LOGIN_URL = 'https://console.aixlab.team/login?redirect=model_center';
+const REDIRECT_SECONDS = 3;
 
 export default function Login() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [registerEnabled, setRegisterEnabled] = useState(false);
-  const { login } = useAuth();
+  const { user } = useAuth();
   const navigate = useNavigate();
+  const [countdown, setCountdown] = useState(REDIRECT_SECONDS);
 
-  // 仅在管理员开启注册时展示注册入口，避免点进去才发现被关闭
+  // cookie 有效时 AuthContext 自愈会把 user 补上，直接进控制台
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await API.get('/api/status');
-        if (!cancelled && res.data?.success) {
-          setRegisterEnabled(res.data.data?.register_enabled === true);
-        }
-      } catch (e) {
-        // 状态不可用时静默隐藏注册入口
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (user) navigate('/dashboard', { replace: true });
+  }, [user, navigate]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!username || !password) {
-      toast.warn('请输入用户名和密码');
-      return;
+  // 没有登录态时倒计时跳面板登录页
+  useEffect(() => {
+    if (user) return undefined;
+    if (countdown <= 0) {
+      window.location.href = PANEL_LOGIN_URL;
+      return undefined;
     }
-    setLoading(true);
-    try {
-      const res = await API.post('/api/user/login', { username, password });
-      if (res.data?.success) {
-        toast.success('登录成功！');
-        login(res.data.data);
-        navigate('/dashboard');
-      } else {
-        toast.error(res.data?.message || '登录失败');
-      }
-    } catch (e) {
-      toast.error('网络连接错误');
-    } finally {
-      setLoading(false);
-    }
-  };
+    const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [user, countdown]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -64,43 +37,23 @@ export default function Login() {
             1
           </div>
           <CardTitle className="text-xl font-bold tracking-tight">One API 控制台</CardTitle>
-          <CardDescription className="text-xs">登录以管理 API 渠道与查询用量事实层</CardDescription>
+          <CardDescription className="text-xs">账号统一由 AIX Lab 面板管理</CardDescription>
         </CardHeader>
-        <form onSubmit={handleSubmit}>
-          <CardContent className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">用户名</label>
-              <Input
-                placeholder="请输入用户名"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">密码</label>
-              <Input
-                type="password"
-                placeholder="请输入密码"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          </CardContent>
-          <CardFooter className="pt-2 flex-col gap-3">
-            <Button type="submit" className="w-full font-semibold" disabled={loading}>
-              {loading ? '正在登录...' : '立即登录'}
-            </Button>
-            {registerEnabled && (
-              <p className="text-xs text-muted-foreground">
-                还没有账号？{' '}
-                <Link to="/register" className="text-primary hover:underline">
-                  注册账号
-                </Link>
-              </p>
-            )}
-          </CardFooter>
-        </form>
+        <CardContent className="text-center text-sm text-muted-foreground space-y-2">
+          {user ? (
+            <p>登录状态有效，正在进入控制台…</p>
+          ) : (
+            <>
+              <p>本站不再单独维护密码，请使用面板账号登录。</p>
+              <p className="text-xs">{countdown} 秒后自动跳转面板登录页</p>
+            </>
+          )}
+        </CardContent>
+        <CardFooter className="pt-2">
+          <Button className="w-full font-semibold" onClick={() => { window.location.href = PANEL_LOGIN_URL; }}>
+            前往面板登录
+          </Button>
+        </CardFooter>
       </Card>
     </div>
   );
